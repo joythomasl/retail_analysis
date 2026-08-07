@@ -1,0 +1,20 @@
+# Ignore data and large files
+data/
+*.csv
+*.parquet
+*.json
+
+# Ignore heavy ML model files
+outputs/*.pkl
+outputs/*.joblib
+
+# Ignore Python cache and environments
+__pycache__/
+*.pyc
+.env
+.venv/
+venv/
+env/
+
+# Ignore OS generated files
+.DS_Store
