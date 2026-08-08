@@ -21,7 +21,6 @@ import streamlit as st
 import pandas as pd
 import numpy as np
 import joblib
-import shap
 import folium
 from folium.plugins import MarkerCluster, Fullscreen, MiniMap, AntPath
 from streamlit_folium import st_folium
@@ -1406,40 +1405,6 @@ MODEL_FEATURE_UI_MAP = {
     "is_peak_season": "Is_Peak_Season",
 }
 
-# Human-readable labels for the Feature Contributions (SHAP) chart --
-# MODEL_FEATURE_UI_MAP's raw snake_case names aren't presentation-ready.
-FEATURE_DISPLAY_NAMES = {
-    "customs_clearance_hours": "Customs Clearance Time",
-    "demand_forecast_units": "Demand Forecast",
-    "distance_km": "Distance",
-    "fuel_price_index": "Fuel Price Index",
-    "geopolitical_risk_index": "Geopolitical Risk",
-    "historical_disruption_count": "Historical Disruptions",
-    "inventory_level_percent": "Inventory Level",
-    "num_alternate_suppliers": "Alternate Suppliers",
-    "order_quantity": "Order Quantity",
-    "order_value_usd": "Order Value",
-    "payment_terms_days": "Payment Terms",
-    "planned_lead_time_days": "Planned Lead Time",
-    "supplier_financial_health_score": "Supplier Financial Health",
-    "supplier_reliability_score": "Supplier Reliability",
-    "unit_cost_usd": "Unit Cost",
-    "weather_risk_index": "Weather Risk",
-    "carrier_name": "Carrier",
-    "contract_type": "Contract Type",
-    "destination_city": "Destination City",
-    "destination_country": "Destination Country",
-    "port_congestion_level": "Port Congestion",
-    "product_category": "Product Category",
-    "product_name": "Product",
-    "supplier_country": "Origin Country",
-    "supplier_id": "Supplier",
-    "transportation_mode": "Transport Mode",
-    "warehouse_id": "Warehouse",
-    "is_peak_season": "Peak Season",
-}
-
-
 def _historical_value(df: pd.DataFrame, ui_col: str, is_numeric: bool, *filter_frames):
     """Historical mean (numeric) or mode (categorical) for ui_col, tried
     against each candidate subset of df in order (most specific first,
@@ -1456,31 +1421,6 @@ def _historical_value(df: pd.DataFrame, ui_col: str, is_numeric: bool, *filter_f
             continue
         return float(series.mean()) if is_numeric else series.mode().iloc[0]
     return 0.0 if is_numeric else "Unknown"
-
-
-@st.cache_resource(show_spinner=False)
-def _load_shap_explainer():
-    """Background sample + SHAP explainer for live single-shipment feature
-    contributions, built the same way notebooks/rebuild_pipeline.py builds
-    its production SHAP explanations (TreeExplainer via shap.Explainer on
-    the tuned HistGradientBoostingClassifier). Cached because building the
-    background/explainer is the only slow part (~30ms) -- scoring one row
-    against it is ~2ms, fast enough to run on every "Analyze Risk" click."""
-    loaded = _load_risk_model()
-    if loaded is None:
-        return None
-    model, encoder, features = loaded
-    try:
-        raw = pd.read_excel(PREDICTIONS_XLSX_PATH)
-    except FileNotFoundError:
-        return None
-    if any(f not in raw.columns for f in features):
-        return None
-    cat_cols = [c for c in encoder.feature_names_in_ if c in features]
-    X = raw[features].copy()
-    X[cat_cols] = encoder.transform(X[cat_cols].astype(str))
-    background = X.sample(min(100, len(X)), random_state=42)
-    return shap.Explainer(model, background), cat_cols
 
 
 def predict_live_risk(df: pd.DataFrame, *, supplier: str, destination: str, origin: str,
@@ -1535,20 +1475,8 @@ def predict_live_risk(df: pd.DataFrame, *, supplier: str, destination: str, orig
     X_enc[cat_cols] = encoder.transform(X_enc[cat_cols].astype(str))
     prob = float(model.predict_proba(X_enc)[0, 1])
 
-    contributions = {}
-    explainer_bundle = _load_shap_explainer()
-    if explainer_bundle is not None:
-        explainer, _ = explainer_bundle
-        try:
-            sv = explainer(X_enc, check_additivity=False)
-            order = np.argsort(-np.abs(sv.values[0]))[:6]
-            contributions = {features[i]: float(sv.values[0][i]) for i in order}
-        except Exception:
-            contributions = {}
-
     return {
         "probability": prob,
-        "contributions": contributions,
         "raw_inputs": row,
     }
 
@@ -1837,43 +1765,6 @@ def create_risk_gauge(score_pct: float, category: str, height: int = 200) -> go.
         height=height, margin=dict(l=30, r=30, t=30, b=10),
         paper_bgcolor="rgba(0,0,0,0)", plot_bgcolor="rgba(0,0,0,0)",
         font={"family": "Poppins"},
-    )
-    return fig
-
-
-def create_feature_waterfall(features: dict) -> go.Figure:
-    """Bar chart showing (real, SHAP-derived) feature contributions to the
-    risk score. Real SHAP magnitudes span a much wider range than the old
-    hand-tuned weights did (a dominant feature can dwarf the rest), so
-    "auto" text positioning would tuck tiny bars' labels right at the plot
-    edge and clip them -- force "outside" placement with real x-axis
-    padding instead, the same fix as the financial waterfall's."""
-    names = list(features.keys())
-    values = list(features.values())
-    v_lo, v_hi = min(0, *values), max(0, *values)
-    span = v_hi - v_lo
-    # Generous padding on *both* sides -- "outside" text for a positive bar
-    # sits to its right, for a negative bar to its left, so both edges of
-    # the range need room, not just the max end.
-    pad = max(span * 0.35, 0.08)
-
-    colors = [COLOR_HIGH if v > 0 else COLOR_LOW for v in values]
-
-    fig = go.Figure(go.Bar(
-        y=names, x=values, orientation="h",
-        marker=dict(color=colors, cornerradius=4),
-        text=[f"+{v:.1f}" if v > 0 else f"{v:.1f}" for v in values],
-        textposition="outside",
-        textfont=dict(size=11, color=COLOR_TEXT_STRONG, family="Poppins"),
-        cliponaxis=False,
-    ))
-    fig.update_layout(
-        height=250, margin=dict(l=8, r=55, t=10, b=0),
-        paper_bgcolor="rgba(0,0,0,0)", plot_bgcolor="rgba(0,0,0,0)",
-        xaxis=dict(showgrid=False, zeroline=True, zerolinecolor=COLOR_BORDER_HOVER,
-                   range=[v_lo - pad, v_hi + pad],
-                   tickfont=dict(size=10, color=COLOR_TEXT_MUTED)),
-        yaxis=dict(tickfont=dict(size=11, color=COLOR_TEXT_MUTED), automargin=True),
     )
     return fig
 
@@ -2401,11 +2292,9 @@ def render_order_entry_module(df: pd.DataFrame):
                     "gp_is_high": env["geopolitical_risk_index"] > 0.35,
                     "gp_is_med": env["geopolitical_risk_index"] > 0.15,
                 }
-                contributions = {}
             else:
                 prob = result["probability"]
                 raw = result["raw_inputs"]
-                contributions = result["contributions"]
                 enrichment = {
                     "port_congestion_display": str(raw["port_congestion_level"]),
                     "weather_display": f"{raw['weather_risk_index']:.0f}/100",
@@ -2518,8 +2407,7 @@ def render_order_entry_module(df: pd.DataFrame):
                 "destination": destination, "mode": mode, "order_value": order_value,
                 "quantity": quantity, "distance": distance, "lead_time": lead_time,
                 "origin": origin, "prob": prob, "band": band, "supplier_rate": supplier_rate,
-                "contributions": contributions, "enrichment": enrichment,
-                "alternatives": alternatives,
+                "enrichment": enrichment, "alternatives": alternatives,
             }
 
         # ── Render from session_state, not from `submitted` -- this is what
@@ -2532,7 +2420,7 @@ def render_order_entry_module(df: pd.DataFrame):
             mode, order_value, quantity = last["mode"], last["order_value"], last["quantity"]
             distance, lead_time, origin = last["distance"], last["lead_time"], last["origin"]
             prob, band, supplier_rate = last["prob"], last["band"], last["supplier_rate"]
-            contributions, enrichment = last["contributions"], last["enrichment"]
+            enrichment = last["enrichment"]
             order_ref = last["order_ref"]
 
             st.caption(f"✓ Logged to Activity Log as **{order_ref}**")
@@ -2597,7 +2485,7 @@ def render_order_entry_module(df: pd.DataFrame):
             # ── ML Risk Score ─────────────────────────────────────────────
             st.markdown('<p class="section-label">🤖 Predictive ML Risk Engine</p>', unsafe_allow_html=True)
 
-            gauge_col, feat_col = st.columns([1, 1])
+            _, gauge_col, _ = st.columns([1, 2, 1])
             with gauge_col:
                 st.markdown(f'''<div class="detail-panel" style="text-align:center;">
                     <p style="font-size:11px; color:{COLOR_TEXT_MUTED}; text-transform:uppercase;
@@ -2608,22 +2496,6 @@ def render_order_entry_module(df: pd.DataFrame):
                 badge = risk_badge_class(band)
                 st.markdown(f'<div style="text-align:center;"><span class="status-badge {badge}">'
                             f'{band} Risk</span></div>', unsafe_allow_html=True)
-
-            with feat_col:
-                st.markdown(
-                    '<div class="detail-panel">'
-                    f'<p style="font-size:11px; color:{COLOR_TEXT_MUTED}; text-transform:uppercase; '
-                    'letter-spacing:0.1em; font-weight:600;">Feature Contributions (SHAP)</p>'
-                    '</div>', unsafe_allow_html=True)
-
-                if contributions:
-                    display_features = {
-                        FEATURE_DISPLAY_NAMES.get(k, k): v for k, v in contributions.items()
-                    }
-                    st.plotly_chart(create_feature_waterfall(display_features), use_container_width=True,
-                                    config={"displayModeBar": False})
-                else:
-                    st.caption("Feature contributions unavailable in fallback (non-ML) mode.")
 
             # ── Alternatives Generator (only if HIGH risk) ────────────────
             if band == "High" and last["alternatives"]:
