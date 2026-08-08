@@ -8,6 +8,12 @@ data/
 outputs/*.pkl
 outputs/*.joblib
 
+# Ignore the local activity-log database (runtime state, not source data)
+*.db
+*.db-wal
+*.db-shm
+*.sqlite3
+
 # Ignore Python cache and environments
 __pycache__/
 *.pyc

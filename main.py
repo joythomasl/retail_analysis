@@ -16,6 +16,7 @@
 
 # pyrefly: ignore [missing-import]
 import os
+import sqlite3
 import streamlit as st
 import pandas as pd
 import numpy as np
@@ -39,20 +40,164 @@ st.set_page_config(
     initial_sidebar_state="expanded",
 )
 
-# ─── Semantic Color Constants (light, bluish theme) ────────────────────────────
-COLOR_HIGH = "#E0393E"
-COLOR_MODERATE = "#B8860B"
-COLOR_LOW = "#0C9440"
-COLOR_BG_CARD = "#FFFFFF"
-COLOR_BG_PANEL = "#F3F9FF"
-COLOR_TEXT = "#0F2A4D"
-COLOR_TEXT_MUTED = "#4E6D95"
-COLOR_BORDER = "#DCEAF9"
-COLOR_ACCENT = "#2E7CF6"
+# ─── Theme (light / dark) ───────────────────────────────────────────────────
+# The whole script reruns top-to-bottom on every interaction (Streamlit's
+# normal model), so theme switching doesn't need client-side CSS-variable
+# swapping or a `data-theme` attribute -- it's enough to pick a palette dict
+# in Python once per run and have both the injected CSS *and* every Plotly
+# figure (which can't see page CSS at all -- it renders its own SVG) read
+# from the same literal hex values. That also means dark mode "just works"
+# everywhere these constants are already used, with zero call-site changes.
+#
+# Persistence uses st.query_params (round-trips through the URL) layered
+# under st.session_state (survives reruns within a tab) -- no browser
+# storage/JS bridge, so there's no risk of redirect loops or a broken first
+# paint. It remembers your choice for the session and across a reload of the
+# same URL; a brand-new tab on the bare URL starts from the default (light).
+def _get_theme() -> str:
+    if "theme" not in st.session_state:
+        qp = st.query_params.get("theme")
+        st.session_state["theme"] = qp if qp in ("light", "dark") else "light"
+    return st.session_state["theme"]
+
+
+def _toggle_theme():
+    st.session_state["theme"] = "dark" if st.session_state.get("_theme_switch") else "light"
+    st.query_params["theme"] = st.session_state["theme"]
+
+
+THEME = _get_theme()
+
+_PALETTES = {
+    "light": {
+        # Semantic risk/accent colors
+        "high": "#E0393E", "moderate": "#B8860B", "low": "#0C9440", "accent": "#2E7CF6",
+        "accent_2": "#1F63D6",
+        # Badge text needs *more* contrast than the base hue on a pale tint
+        # background -- darker in light mode, lighter in dark mode (below).
+        "badge_high_text": "#C4282D", "badge_moderate_text": "#9A6E00", "badge_low_text": "#0C9440",
+        # Surfaces
+        "bg_card": "#FFFFFF", "bg_card_2": "#F2F8FF", "bg_panel": "#F3F9FF", "bg_soft": "#F3F8FE",
+        "bg_hover": "#EAF3FE", "bg_danger_soft": "#FFF3F3",
+        "app_grad": "linear-gradient(165deg, #EFF6FF 0%, #FFFFFF 45%, #E9F2FC 100%)",
+        "sidebar_grad": "linear-gradient(180deg, #F2F8FF 0%, #E6F1FC 100%)",
+        "header_grad": "linear-gradient(135deg, #FFFFFF 0%, #F2F8FF 50%, #FFFFFF 100%)",
+        "tab_bg": "#EAF3FE", "tab_active_grad": "linear-gradient(135deg, #FFFFFF 0%, #DCEAFC 100%)",
+        # Text
+        "text": "#0F2A4D", "text_strong": "#0B1E38", "text_muted": "#4E6D95", "text_faint": "#8792A8",
+        # Borders
+        "border": "#DCEAF9", "border_soft": "#EAF1FB", "border_hover": "#B8D4F5",
+        "border_danger": "#F7D3D3", "border_danger_hover": "#EFAFAF",
+        # Shadows / chart chrome (rgb triplet, alpha applied per-use)
+        "shadow_rgb": "20,70,140", "shadow_danger_rgb": "190,40,45",
+        "chart_grid": "rgba(20,70,140,0.07)", "chart_bg_soft": "#F0F1F7",
+        # Success chip (sidebar "data loaded" banner)
+        "success_chip_bg": "#1A2A1A", "success_chip_border": "#2A4A2A",
+        # Map tile to use for this theme (folium base layer)
+        "map_tile": "CartoDB positron",
+    },
+    "dark": {
+        "high": "#FF5C61", "moderate": "#E5A82E", "low": "#2ECC71", "accent": "#4C8DFF",
+        "accent_2": "#6DA3FF",
+        "badge_high_text": "#FF9297", "badge_moderate_text": "#F0C24E", "badge_low_text": "#5EE096",
+        "bg_card": "#141C30", "bg_card_2": "#101828", "bg_panel": "#101A2C", "bg_soft": "#131E33",
+        "bg_hover": "#18243C", "bg_danger_soft": "#2A1518",
+        "app_grad": "linear-gradient(165deg, #0A0F1C 0%, #0D1424 45%, #090E19 100%)",
+        "sidebar_grad": "linear-gradient(180deg, #0D1424 0%, #0A0F1C 100%)",
+        "header_grad": "linear-gradient(135deg, #141C30 0%, #101828 50%, #141C30 100%)",
+        "tab_bg": "#101A2C", "tab_active_grad": "linear-gradient(135deg, #1B2740 0%, #223257 100%)",
+        "text": "#E9EFFB", "text_strong": "#FFFFFF", "text_muted": "#94A6C4", "text_faint": "#5F7194",
+        "border": "#233252", "border_soft": "#1B2A45", "border_hover": "#3C5CA0",
+        "border_danger": "#4A2530", "border_danger_hover": "#6B333F",
+        "shadow_rgb": "0,0,0", "shadow_danger_rgb": "0,0,0",
+        "chart_grid": "rgba(255,255,255,0.09)", "chart_bg_soft": "#1B2740",
+        "success_chip_bg": "#132318", "success_chip_border": "#204430",
+        "map_tile": "CartoDB dark_matter",
+    },
+}
+PAL = _PALETTES[THEME]
+
+# ─── Semantic Color Constants (resolved against the active theme) ──────────
+COLOR_HIGH = PAL["high"]
+COLOR_MODERATE = PAL["moderate"]
+COLOR_LOW = PAL["low"]
+COLOR_BG_CARD = PAL["bg_card"]
+COLOR_BG_PANEL = PAL["bg_panel"]
+COLOR_TEXT = PAL["text"]
+COLOR_TEXT_STRONG = PAL["text_strong"]
+COLOR_TEXT_MUTED = PAL["text_muted"]
+COLOR_TEXT_FAINT = PAL["text_faint"]
+COLOR_BORDER = PAL["border"]
+COLOR_BORDER_HOVER = PAL["border_hover"]
+COLOR_ACCENT = PAL["accent"]
+# Plotly renders its own SVG and can't see page CSS at all, so its figures
+# read these same PAL-derived constants directly rather than any var(...).
+COLOR_CHART_GRID = PAL["chart_grid"]
+COLOR_CHART_BG_SOFT = PAL["chart_bg_soft"]
 
 
 # ─── Custom CSS ───────────────────────────────────────────────────────────────
 def inject_custom_css():
+    p = PAL
+
+    # Palette -> CSS custom properties. Kept as its own small, hand-checked
+    # f-string block so every literal `{ }` in the *much* bigger rules block
+    # below can stay a plain (non-interpolated) string -- no brace-escaping
+    # across ~500 lines of CSS, and Plotly (which can't see page CSS at all;
+    # it renders its own SVG) reads the same PAL dict directly in Python
+    # instead, so both stay in sync every rerun with zero risk of drift.
+    st.markdown(f"""
+    <style>
+    :root {{
+        --high: {p['high']}; --moderate: {p['moderate']}; --low: {p['low']};
+        --accent: {p['accent']}; --accent-2: {p['accent_2']};
+        --badge-high-text: {p['badge_high_text']};
+        --badge-moderate-text: {p['badge_moderate_text']};
+        --badge-low-text: {p['badge_low_text']};
+        --bg-card: {p['bg_card']}; --bg-card-2: {p['bg_card_2']};
+        --bg-panel: {p['bg_panel']}; --bg-soft: {p['bg_soft']};
+        --bg-hover: {p['bg_hover']}; --bg-danger-soft: {p['bg_danger_soft']};
+        --text: {p['text']}; --text-strong: {p['text_strong']};
+        --text-muted: {p['text_muted']}; --text-faint: {p['text_faint']};
+        --border: {p['border']}; --border-soft: {p['border_soft']};
+        --border-hover: {p['border_hover']};
+        --border-danger: {p['border_danger']}; --border-danger-hover: {p['border_danger_hover']};
+        --shadow-rgb: {p['shadow_rgb']}; --shadow-danger-rgb: {p['shadow_danger_rgb']};
+        --app-grad: {p['app_grad']}; --sidebar-grad: {p['sidebar_grad']};
+        --header-grad: {p['header_grad']};
+        --tab-bg: {p['tab_bg']}; --tab-active-grad: {p['tab_active_grad']};
+        --grad-card: linear-gradient(145deg, var(--bg-card) 0%, var(--bg-card-2) 100%);
+        --grad-panel: linear-gradient(145deg, var(--bg-card) 0%, var(--bg-panel) 100%);
+        --grad-danger: linear-gradient(145deg, var(--bg-card) 0%, var(--bg-danger-soft) 100%);
+        --grad-primary-btn: linear-gradient(135deg, var(--accent) 0%, var(--accent-2) 100%);
+        --grad-header-title: linear-gradient(135deg, var(--text-strong) 0%, var(--accent) 100%);
+        /* Glide-data-grid (st.dataframe's canvas grid) public theming hooks
+           -- documented upstream API, not a Streamlit internal. If this
+           Streamlit version's bundled grid honors them, tables re-theme for
+           free; if it doesn't, they're inert and the grid keeps its default
+           rendering (checked visually either way, see QA screenshots). */
+        --gdg-bg-cell: var(--bg-card); --gdg-bg-cell-medium: var(--bg-panel);
+        --gdg-bg-header: var(--bg-panel); --gdg-bg-header-has-focus: var(--bg-hover);
+        --gdg-bg-header-hovered: var(--bg-hover);
+        --gdg-text-dark: var(--text); --gdg-text-medium: var(--text-muted);
+        --gdg-text-light: var(--text-faint); --gdg-text-bubble: var(--text);
+        --gdg-bg-bubble: var(--bg-soft); --gdg-bg-bubble-selected: var(--bg-hover);
+        --gdg-border-color: var(--border); --gdg-horizontal-border-color: var(--border);
+        --gdg-link-color: var(--accent); --gdg-bg-search-result: var(--bg-hover);
+        --gdg-accent-color: var(--accent); --gdg-accent-fg: #FFFFFF;
+        --gdg-accent-light: rgba({p['shadow_rgb']},0.14);
+        /* Streamlit's own theme variable names -- overriding these gives
+           any native (DOM-rendered) chrome that already reads them a shot
+           at following our theme too, layered under the explicit rules
+           below. Additive only: a no-op wherever nothing consumes them. */
+        --primary-color: var(--accent);
+        --background-color: var(--bg-card);
+        --secondary-background-color: var(--bg-panel);
+        --text-color: var(--text);
+    }}
+    </style>
+    """, unsafe_allow_html=True)
+
     st.markdown("""
     <style>
         @import url('https://fonts.googleapis.com/css2?family=Poppins:wght@300;400;500;600;700;800&display=swap');
@@ -72,18 +217,38 @@ def inject_custom_css():
             font-family: 'Material Symbols Rounded', 'Material Symbols Outlined', 'Material Icons' !important;
         }
 
+        /* ── Entrance animations ─────────────────────────────────────────────
+           Kept short (300-400ms) and used on elements that are rebuilt fresh
+           each page load/switch -- st.navigation fully remounts a page's
+           tree, so this replays as a "page transition" on nav, but won't
+           re-flash on every same-page rerun where the underlying markup is
+           unchanged (Streamlit no-ops identical element updates). */
+        @keyframes fadeIn { from { opacity: 0; } to { opacity: 1; } }
+        @keyframes fadeInUp {
+            from { opacity: 0; transform: translateY(10px); }
+            to { opacity: 1; transform: translateY(0); }
+        }
+
         .stApp {
-            background: linear-gradient(165deg, #EFF6FF 0%, #FFFFFF 45%, #E9F2FC 100%);
+            background: var(--app-grad);
+            transition: background 0.35s ease;
+        }
+
+        .block-container {
+            padding-top: 1.5rem !important;
+            padding-bottom: 1rem !important;
+            animation: fadeIn 0.35s ease both;
         }
 
         /* ── Sidebar: always visible, never collapsible ─────────────────────── */
         section[data-testid="stSidebar"] {
-            background: linear-gradient(180deg, #F2F8FF 0%, #E6F1FC 100%);
-            border-right: 1px solid #D6E7F8;
+            background: var(--sidebar-grad);
+            border-right: 1px solid var(--border);
             min-width: 300px !important;
             max-width: 340px !important;
             transform: none !important;
             visibility: visible !important;
+            transition: background 0.35s ease, border-color 0.35s ease;
         }
 
         /* Hide the collapse arrow inside the sidebar and the "reopen" chevron
@@ -97,23 +262,47 @@ def inject_custom_css():
             visibility: hidden !important;
         }
 
+        /* Native sidebar nav links + widget labels -- DOM-rendered chrome
+           that our own classes below don't cover, kept legible explicitly
+           rather than assuming Streamlit's own --text-color plumbing
+           reaches them in every version. */
+        section[data-testid="stSidebar"] p,
+        section[data-testid="stSidebar"] span,
+        section[data-testid="stSidebar"] label,
+        [data-testid="stSidebarNav"] a,
+        [data-testid="stSidebarNav"] span {
+            color: var(--text);
+        }
+        [data-testid="stSidebarNav"] a[aria-current="page"] {
+            background: var(--bg-hover);
+            border-radius: 10px;
+        }
+        [data-testid="stSidebarNav"] a {
+            border-radius: 10px;
+            transition: background 0.16s ease;
+        }
+        [data-testid="stSidebarNav"] a:hover {
+            background: var(--bg-hover);
+        }
+
         .command-center-header {
-            background: linear-gradient(135deg, #FFFFFF 0%, #F2F8FF 50%, #FFFFFF 100%);
-            border: 1px solid #D6E7F8;
+            background: var(--header-grad);
+            border: 1px solid var(--border);
             border-radius: 20px;
             padding: 20px 32px;
             margin-bottom: 20px;
             display: flex;
             align-items: center;
             justify-content: space-between;
-            box-shadow: 0 8px 28px rgba(20,70,140,0.07), inset 0 1px 0 rgba(255,255,255,0.6);
-            transition: box-shadow 0.25s ease;
+            box-shadow: 0 8px 28px rgba(var(--shadow-rgb),0.07), inset 0 1px 0 rgba(255,255,255,0.06);
+            transition: box-shadow 0.25s ease, background 0.35s ease, border-color 0.35s ease;
+            animation: fadeInUp 0.4s cubic-bezier(0.22, 1, 0.36, 1) both;
         }
 
         .header-title {
-            font-size: 24px;
+            font-size: 25px;
             font-weight: 700;
-            background: linear-gradient(135deg, #123A6B 0%, #2E7CF6 100%);
+            background: var(--grad-header-title);
             -webkit-background-clip: text;
             -webkit-text-fill-color: transparent;
             letter-spacing: -0.02em;
@@ -123,15 +312,15 @@ def inject_custom_css():
 
         .header-subtitle {
             font-size: 12px;
-            color: #4E6D95;
+            color: var(--text-muted);
             margin: 4px 0 0 0;
             font-weight: 400;
             line-height: 1.5;
         }
 
         .kpi-card {
-            background: linear-gradient(145deg, #FFFFFF 0%, #F2F8FF 100%);
-            border: 1px solid #DCEAF9;
+            background: var(--grad-card);
+            border: 1px solid var(--border);
             border-radius: 20px;
             padding: 20px 22px;
             min-height: 108px;
@@ -140,14 +329,15 @@ def inject_custom_css():
             flex-direction: column;
             align-items: center;
             justify-content: center;
-            box-shadow: 0 4px 16px rgba(20,70,140,0.06);
-            transition: transform 0.22s cubic-bezier(0.22, 1, 0.36, 1), box-shadow 0.22s ease, border-color 0.22s ease;
+            box-shadow: 0 4px 16px rgba(var(--shadow-rgb),0.06);
+            transition: transform 0.22s cubic-bezier(0.22, 1, 0.36, 1), box-shadow 0.22s ease, border-color 0.22s ease, background 0.35s ease;
+            animation: fadeInUp 0.4s cubic-bezier(0.22, 1, 0.36, 1) both;
         }
 
         .kpi-card:hover {
             transform: translateY(-3px);
-            box-shadow: 0 10px 28px rgba(20,70,140,0.12);
-            border-color: #B8D4F5;
+            box-shadow: 0 10px 28px rgba(var(--shadow-rgb),0.16);
+            border-color: var(--border-hover);
         }
 
         .kpi-value {
@@ -156,11 +346,12 @@ def inject_custom_css():
             letter-spacing: -0.03em;
             margin: 0;
             line-height: 1.25;
+            color: var(--text-strong);
         }
 
         .kpi-label {
             font-size: 11px;
-            color: #4E6D95;
+            color: var(--text-muted);
             text-align: center;
             text-transform: uppercase;
             letter-spacing: 0.09em;
@@ -174,19 +365,20 @@ def inject_custom_css():
            officially supported hook for scoping CSS to one specific
            Streamlit element (see render_control_tower). */
         .st-key-kpi_high_risk_card {
-            background: linear-gradient(145deg, #FFFFFF 0%, #FFF3F3 100%);
-            border: 1px solid #F7D3D3;
+            background: var(--grad-danger);
+            border: 1px solid var(--border-danger);
             border-radius: 20px;
             padding: 10px 10px 16px;
             min-height: 108px;
-            box-shadow: 0 4px 16px rgba(190,40,45,0.07);
+            box-shadow: 0 4px 16px rgba(var(--shadow-danger-rgb),0.10);
             transition: transform 0.22s cubic-bezier(0.22, 1, 0.36, 1), box-shadow 0.22s ease, border-color 0.22s ease;
+            animation: fadeInUp 0.4s cubic-bezier(0.22, 1, 0.36, 1) both;
         }
 
         .st-key-kpi_high_risk_card:hover {
             transform: translateY(-3px);
-            box-shadow: 0 10px 28px rgba(190,40,45,0.14);
-            border-color: #EFAFAF;
+            box-shadow: 0 10px 28px rgba(var(--shadow-danger-rgb),0.22);
+            border-color: var(--border-danger-hover);
         }
 
         .st-key-kpi_high_risk_card .stButton > button {
@@ -196,14 +388,14 @@ def inject_custom_css():
             font-size: 32px !important;
             font-weight: 800 !important;
             letter-spacing: -0.03em;
-            color: #E0393E !important;
+            color: var(--high) !important;
             padding: 4px 4px 0 !important;
             width: 100%;
             transition: transform 0.15s ease;
         }
 
         .st-key-kpi_high_risk_card .stButton > button:hover {
-            background: rgba(224,57,62,0.07) !important;
+            background: rgba(var(--shadow-danger-rgb),0.10) !important;
             border-radius: 12px !important;
             transform: none !important;
         }
@@ -218,18 +410,19 @@ def inject_custom_css():
         }
 
         .detail-panel {
-            background: linear-gradient(145deg, #FFFFFF 0%, #F3F9FF 100%);
-            border: 1px solid #DCEAF9;
+            background: var(--grad-panel);
+            border: 1px solid var(--border);
             border-radius: 20px;
             padding: 24px;
-            box-shadow: 0 4px 16px rgba(20,70,140,0.06);
-            transition: box-shadow 0.25s ease;
+            box-shadow: 0 4px 16px rgba(var(--shadow-rgb),0.06);
+            transition: box-shadow 0.25s ease, background 0.35s ease, border-color 0.35s ease;
+            animation: fadeInUp 0.35s cubic-bezier(0.22, 1, 0.36, 1) both;
         }
 
         .detail-header {
             font-size: 18px;
             font-weight: 700;
-            color: #0F2A4D;
+            color: var(--text-strong);
             margin-bottom: 4px;
             letter-spacing: -0.01em;
             line-height: 1.4;
@@ -237,23 +430,24 @@ def inject_custom_css():
 
         .detail-subheader {
             font-size: 12px;
-            color: #4E6D95;
+            color: var(--text-muted);
             line-height: 1.6;
             margin-bottom: 16px;
         }
 
         .info-box {
-            background: #F3F8FE;
+            background: var(--bg-soft);
             border-radius: 16px;
             padding: 18px 20px;
             margin-bottom: 12px;
             border-left: 4px solid;
+            animation: fadeInUp 0.35s cubic-bezier(0.22, 1, 0.36, 1) both;
         }
 
-        .info-box.impact { border-left-color: #E0393E; }
-        .info-box.solution { border-left-color: #0C9440; }
-        .info-box.warning { border-left-color: #B8860B; }
-        .info-box.info { border-left-color: #2E7CF6; }
+        .info-box.impact { border-left-color: var(--high); }
+        .info-box.solution { border-left-color: var(--low); }
+        .info-box.warning { border-left-color: var(--moderate); }
+        .info-box.info { border-left-color: var(--accent); }
 
         .info-box-title {
             font-size: 11px;
@@ -266,18 +460,18 @@ def inject_custom_css():
 
         .info-box-content {
             font-size: 13px;
-            color: #33425C;
+            color: var(--text-muted);
             line-height: 1.65;
         }
 
         .section-label {
             font-size: 15px;
             font-weight: 600;
-            color: #0F2A4D;
+            color: var(--text-strong);
             line-height: 1.5;
             margin-bottom: 14px;
             padding-bottom: 8px;
-            border-bottom: 1px solid #DCEAF9;
+            border-bottom: 1px solid var(--border);
         }
 
         .status-badge {
@@ -293,25 +487,26 @@ def inject_custom_css():
             white-space: nowrap;
         }
 
-        .badge-high { background: rgba(224,57,62,0.12); color: #C4282D; }
-        .badge-moderate { background: rgba(184,134,11,0.14); color: #9A6E00; }
-        .badge-low { background: rgba(12,148,64,0.12); color: #0C9440; }
+        .badge-high { background: rgba(224,57,62,0.15); color: var(--badge-high-text); }
+        .badge-moderate { background: rgba(184,134,11,0.17); color: var(--badge-moderate-text); }
+        .badge-low { background: rgba(12,148,64,0.15); color: var(--badge-low-text); }
 
         /* ── Alternative Cards ─────────────────────────────────────────────── */
         .alt-card {
-            background: linear-gradient(145deg, #FFFFFF 0%, #F3F9FF 100%);
-            border: 1px solid #DCEAF9;
+            background: var(--grad-panel);
+            border: 1px solid var(--border);
             border-radius: 20px;
             padding: 22px;
-            box-shadow: 0 4px 16px rgba(20,70,140,0.06);
+            box-shadow: 0 4px 16px rgba(var(--shadow-rgb),0.06);
             position: relative;
             overflow: hidden;
             transition: transform 0.22s cubic-bezier(0.22, 1, 0.36, 1), box-shadow 0.22s ease;
+            animation: fadeInUp 0.4s cubic-bezier(0.22, 1, 0.36, 1) both;
         }
 
         .alt-card:hover {
-            transform: translateY(-2px);
-            box-shadow: 0 10px 26px rgba(20,70,140,0.10);
+            transform: translateY(-3px);
+            box-shadow: 0 12px 28px rgba(var(--shadow-rgb),0.14);
         }
 
         .alt-card::before {
@@ -323,9 +518,9 @@ def inject_custom_css():
             height: 3px;
         }
 
-        .alt-card.original::before { background: linear-gradient(90deg, #E0393E, #FF6B6B); }
-        .alt-card.modal-shift::before { background: linear-gradient(90deg, #B8860B, #FFD84B); }
-        .alt-card.vendor-shift::before { background: linear-gradient(90deg, #0C9440, #2BC85B); }
+        .alt-card.original::before { background: linear-gradient(90deg, var(--high), #FF6B6B); }
+        .alt-card.modal-shift::before { background: linear-gradient(90deg, var(--moderate), #FFD84B); }
+        .alt-card.vendor-shift::before { background: linear-gradient(90deg, var(--low), #2BC85B); }
 
         .alt-card-label {
             font-size: 11px;
@@ -345,7 +540,7 @@ def inject_custom_css():
 
         .alt-card-metric {
             font-size: 12.5px;
-            color: #48597A;
+            color: var(--text-muted);
             line-height: 1.6;
             margin-top: 4px;
         }
@@ -355,18 +550,20 @@ def inject_custom_css():
             display: inline-flex;
             align-items: center;
             gap: 8px;
-            background: #F3F8FE;
-            border: 1px solid #DCEAF9;
+            background: var(--bg-soft);
+            border: 1px solid var(--border);
             border-radius: 14px;
             padding: 12px 16px;
             margin-bottom: 8px;
             width: 100%;
-            transition: border-color 0.2s ease, background 0.2s ease;
+            transition: border-color 0.2s ease, background 0.2s ease, transform 0.2s ease;
+            animation: fadeInUp 0.35s cubic-bezier(0.22, 1, 0.36, 1) both;
         }
 
         .enrichment-pill:hover {
-            border-color: #B8D4F5;
-            background: #EAF3FE;
+            border-color: var(--border-hover);
+            background: var(--bg-hover);
+            transform: translateY(-1px);
         }
 
         .enrichment-pill .ep-icon {
@@ -376,7 +573,7 @@ def inject_custom_css():
 
         .enrichment-pill .ep-label {
             font-size: 10px;
-            color: #4E6D95;
+            color: var(--text-muted);
             text-transform: uppercase;
             letter-spacing: 0.07em;
             line-height: 1.6;
@@ -386,15 +583,24 @@ def inject_custom_css():
             font-size: 18px;
             font-weight: 700;
             line-height: 1.4;
+            color: var(--text-strong);
         }
 
         /* ── Financial Metric ──────────────────────────────────────────────── */
         .fin-metric {
-            background: linear-gradient(145deg, #FFFFFF 0%, #F3F9FF 100%);
-            border: 1px solid #DCEAF9;
+            background: var(--grad-panel);
+            border: 1px solid var(--border);
             border-radius: 20px;
             padding: 24px;
             text-align: center;
+            box-shadow: 0 4px 16px rgba(var(--shadow-rgb),0.06);
+            transition: transform 0.22s cubic-bezier(0.22, 1, 0.36, 1), box-shadow 0.22s ease;
+            animation: fadeInUp 0.4s cubic-bezier(0.22, 1, 0.36, 1) both;
+        }
+
+        .fin-metric:hover {
+            transform: translateY(-3px);
+            box-shadow: 0 10px 26px rgba(var(--shadow-rgb),0.13);
         }
 
         .fin-metric .fm-value {
@@ -406,7 +612,7 @@ def inject_custom_css():
 
         .fin-metric .fm-label {
             font-size: 11px;
-            color: #4E6D95;
+            color: var(--text-muted);
             text-transform: uppercase;
             letter-spacing: 0.09em;
             line-height: 1.5;
@@ -426,8 +632,8 @@ def inject_custom_css():
            names, longer city names) from wrapping into cramped, overlapping
            lines the way single-line, no-line-height text did before. */
         .cascade-node {
-            background: #F3F8FE;
-            border: 1px solid #DCEAF9;
+            background: var(--bg-soft);
+            border: 1px solid var(--border);
             border-radius: 16px;
             padding: 18px 14px;
             min-height: 148px;
@@ -436,34 +642,35 @@ def inject_custom_css():
             align-items: center;
             justify-content: center;
             text-align: center;
-            transition: all 0.3s ease;
+            transition: transform 0.2s ease, box-shadow 0.3s ease, border-color 0.3s ease, background 0.3s ease;
+            animation: fadeInUp 0.4s cubic-bezier(0.22, 1, 0.36, 1) both;
         }
 
         .cascade-node.critical {
-            border-color: #E0393E;
-            box-shadow: 0 0 18px rgba(224,57,62,0.12);
+            border-color: var(--high);
+            box-shadow: 0 0 18px rgba(224,57,62,0.16);
         }
 
         .cascade-node.warning {
-            border-color: #B8860B;
-            box-shadow: 0 0 18px rgba(184,134,11,0.10);
+            border-color: var(--moderate);
+            box-shadow: 0 0 18px rgba(184,134,11,0.14);
         }
 
         .cascade-node.safe {
-            border-color: #0C9440;
+            border-color: var(--low);
         }
 
         .cascade-node-title {
             font-size: 15px;
             font-weight: 700;
-            color: #0F2A4D;
+            color: var(--text-strong);
             line-height: 1.4;
             word-break: break-word;
         }
 
         .cascade-node-sub {
             font-size: 12.5px;
-            color: #48597A;
+            color: var(--text-muted);
             line-height: 1.5;
             margin-top: 5px;
             word-break: break-word;
@@ -479,8 +686,8 @@ def inject_custom_css():
 
         /* ── Order List (Control Tower) ───────────────────────────────────── */
         .order-row {
-            background: #FFFFFF;
-            border: 1px solid #DCEAF9;
+            background: var(--bg-card);
+            border: 1px solid var(--border);
             border-radius: 14px;
             padding: 10px 14px;
             margin-bottom: 6px;
@@ -489,41 +696,44 @@ def inject_custom_css():
 
         .order-row:hover {
             transform: translateX(2px);
-            box-shadow: 0 4px 14px rgba(20,70,140,0.08);
-            border-color: #B8D4F5;
+            box-shadow: 0 4px 14px rgba(var(--shadow-rgb),0.10);
+            border-color: var(--border-hover);
         }
 
         .order-row.selected {
-            border-color: #2E7CF6;
-            box-shadow: 0 0 0 2px rgba(46,124,246,0.18), 0 4px 14px rgba(20,70,140,0.08);
-            background: #EFF6FF;
+            border-color: var(--accent);
+            box-shadow: 0 0 0 2px rgba(46,124,246,0.18), 0 4px 14px rgba(var(--shadow-rgb),0.10);
+            background: var(--bg-hover);
         }
 
         /* ── Streamlit Overrides ────────────────────────────────────────────── */
         .stButton > button {
             border-radius: 12px;
+            font-weight: 500;
             transition: transform 0.16s cubic-bezier(0.22, 1, 0.36, 1), box-shadow 0.16s ease, color 0.16s ease, border-color 0.16s ease, background 0.16s ease;
         }
 
-        .stButton > button:hover {
-            transform: translateY(-1px);
+        .stButton > button:hover { transform: translateY(-1px); }
+        .stButton > button:active { transform: translateY(0) scale(0.97); }
+        .stButton > button:disabled { transform: none !important; opacity: 0.5; }
+        .stButton > button:focus-visible {
+            outline: 2px solid var(--accent);
+            outline-offset: 2px;
         }
 
-        .stButton > button:active {
-            transform: translateY(0) scale(0.97);
-        }
-
+        /* Primary: filled gradient, heaviest shadow -- the one confident
+           call-to-action per view. */
         .stButton > button[kind="primary"] {
-            background: linear-gradient(135deg, #2E7CF6 0%, #1F63D6 100%);
+            background: var(--grad-primary-btn);
             border: none;
             border-radius: 12px;
             padding: 10px 28px;
             font-weight: 600;
-            box-shadow: 0 4px 16px rgba(46,124,246,0.30);
+            box-shadow: 0 4px 16px rgba(46,124,246,0.32);
         }
 
         .stButton > button[kind="primary"]:hover {
-            box-shadow: 0 6px 22px rgba(46,124,246,0.45);
+            box-shadow: 0 6px 22px rgba(46,124,246,0.48);
             transform: translateY(-1px);
         }
 
@@ -532,61 +742,166 @@ def inject_custom_css():
             transform: translateY(0) scale(0.97);
         }
 
+        /* Secondary: outlined with a quiet resting shadow -- the default,
+           lower-emphasis action next to a primary one. */
         .stButton > button[kind="secondary"] {
             border-radius: 12px;
+            background: var(--bg-card);
+            border-color: var(--border);
+            color: var(--text);
+            box-shadow: 0 2px 8px rgba(var(--shadow-rgb),0.05);
+        }
+        .stButton > button[kind="secondary"] p {
+            color: inherit;
         }
 
         .stButton > button[kind="secondary"]:hover {
-            border-color: #2E7CF6;
-            color: #2E7CF6;
+            border-color: var(--accent);
+            color: var(--accent);
+            box-shadow: 0 4px 14px rgba(var(--shadow-rgb),0.10);
             transform: translateY(-1px);
         }
 
         .stButton > button[kind="secondary"]:active {
-            background: #EFF6FF;
+            background: var(--bg-hover);
             transform: translateY(0) scale(0.97);
+        }
+
+        /* Tertiary (download/export): minimal chrome at rest, only gains
+           weight on hover -- for the lowest-emphasis actions. */
+        [data-testid="stDownloadButton"] button {
+            border-radius: 12px;
+            background: transparent;
+            border: 1px solid var(--border);
+            color: var(--text-muted);
+            box-shadow: none;
+            transition: transform 0.16s cubic-bezier(0.22, 1, 0.36, 1), box-shadow 0.16s ease, color 0.16s ease, border-color 0.16s ease, background 0.16s ease;
+        }
+        [data-testid="stDownloadButton"] button p {
+            color: inherit;
+        }
+
+        [data-testid="stDownloadButton"] button:hover {
+            border-color: var(--accent);
+            color: var(--accent);
+            background: var(--bg-hover);
+            box-shadow: 0 4px 14px rgba(var(--shadow-rgb),0.10);
+            transform: translateY(-1px);
         }
 
         #MainMenu { visibility: hidden; }
         header { visibility: hidden; }
         footer { visibility: hidden; }
 
-        .block-container {
-            padding-top: 1.5rem !important;
-            padding-bottom: 1rem !important;
-        }
-
-        div[data-testid="stExpander"] {
-            border: 1px solid #DCEAF9;
+        [data-testid="stExpander"] {
+            border: 1px solid var(--border);
             border-radius: 18px;
-            background: #FFFFFF;
+            background: var(--bg-card);
+            transition: border-color 0.2s ease;
         }
 
-        div[data-testid="stDataFrame"] {
+        [data-testid="stExpander"]:hover {
+            border-color: var(--border-hover);
+        }
+
+        [data-testid="stExpander"] summary,
+        [data-testid="stExpander"] summary p,
+        [data-testid="stExpander"] summary span {
+            color: var(--text) !important;
+        }
+
+        [data-testid="stDataFrame"] {
             border-radius: 16px;
             overflow: hidden;
+            border: 1px solid var(--border);
         }
 
-        /* Text inputs / selects: rounder, and consistent vertical centering
-           for their labels/content so nothing looks clipped or off-baseline. */
-        div[data-testid="stTextInput"] input,
-        div[data-testid="stSelectbox"] div[data-baseweb="select"] > div,
-        div[data-testid="stNumberInput"] input {
+        /* Text inputs / selects: rounder, theme-aware fill/border/text, and
+           consistent vertical centering so nothing looks clipped or
+           off-baseline. */
+        [data-testid="stTextInput"] input,
+        [data-testid="stNumberInput"] input,
+        [data-testid="stDateInput"] input,
+        [data-testid="stSelectbox"] div[data-baseweb="select"] > div,
+        [data-testid="stMultiSelect"] div[data-baseweb="select"] > div {
             border-radius: 12px !important;
+            background-color: var(--bg-card) !important;
+            border-color: var(--border) !important;
+            color: var(--text) !important;
+            transition: border-color 0.16s ease, box-shadow 0.16s ease;
         }
 
-        div[data-testid="stWidgetLabel"] p {
+        [data-testid="stTextInput"] input:focus,
+        [data-testid="stNumberInput"] input:focus,
+        [data-testid="stDateInput"] input:focus {
+            border-color: var(--accent) !important;
+            box-shadow: 0 0 0 2px rgba(46,124,246,0.15) !important;
+        }
+
+        [data-testid="stMultiSelect"] span[data-baseweb="tag"] {
+            background: var(--accent) !important;
+            border-radius: 8px !important;
+        }
+
+        /* Dropdown/select popovers render in a portal near <body>, outside
+           .stApp -- :root-scoped variables still reach them since they're
+           document-wide, not scoped to where the rule was declared. */
+        div[data-baseweb="popover"] ul[role="listbox"],
+        div[data-baseweb="menu"] {
+            background: var(--bg-card) !important;
+            border: 1px solid var(--border) !important;
+        }
+
+        div[data-baseweb="popover"] li[role="option"] {
+            color: var(--text) !important;
+        }
+
+        div[data-baseweb="popover"] li[role="option"]:hover,
+        div[data-baseweb="popover"] li[aria-selected="true"] {
+            background: var(--bg-hover) !important;
+        }
+
+        [data-testid="stWidgetLabel"] p {
             line-height: 1.5;
+            color: var(--text);
         }
 
-        div[data-testid="stMetricValue"], div[data-testid="stMetricLabel"] {
+        [data-testid="stCaptionContainer"] {
+            color: var(--text-muted) !important;
+        }
+
+        /* Native markdown headings (st.markdown("### ..."), st.header, etc.)
+           -- Streamlit gives these their own fixed dark color regardless of
+           theme, same root cause as the widget-label fix above. Safe to
+           override broadly: unlike buttons, no heading in this app sits on
+           a colored fill that needs a specific fixed contrast color. */
+        [data-testid="stMarkdownContainer"] h1,
+        [data-testid="stMarkdownContainer"] h2,
+        [data-testid="stMarkdownContainer"] h3,
+        [data-testid="stMarkdownContainer"] h4,
+        [data-testid="stMarkdownContainer"] h5,
+        [data-testid="stMarkdownContainer"] h6 {
+            color: var(--text-strong);
+        }
+
+        [data-testid="stMetricValue"] {
             line-height: 1.4;
+            color: var(--text-strong);
+        }
+        [data-testid="stMetricLabel"] {
+            line-height: 1.4;
+            color: var(--text-muted);
+        }
+
+        [data-testid="stRadio"] label p,
+        [data-testid="stCheckbox"] label p {
+            color: var(--text);
         }
 
         /* Tab styling */
         .stTabs [data-baseweb="tab-list"] {
             gap: 4px;
-            background: #EAF3FE;
+            background: var(--tab-bg);
             border-radius: 14px;
             padding: 4px;
         }
@@ -597,17 +912,25 @@ def inject_custom_css():
             font-weight: 500;
             font-size: 13px;
             line-height: 1.6;
-            transition: background 0.2s ease;
+            color: var(--text-muted);
+            transition: background 0.2s ease, color 0.2s ease;
         }
 
         .stTabs [aria-selected="true"] {
-            background: linear-gradient(135deg, #FFFFFF 0%, #DCEAFC 100%) !important;
-            box-shadow: 0 2px 8px rgba(20,70,140,0.10);
+            background: var(--tab-active-grad) !important;
+            color: var(--text-strong) !important;
+            box-shadow: 0 2px 8px rgba(var(--shadow-rgb),0.10);
         }
 
         /* Smoother widget/page transitions overall */
-        div[data-testid="stVerticalBlock"] { transition: opacity 0.15s ease; }
+        [data-testid="stVerticalBlock"] { transition: opacity 0.15s ease; }
         iframe { transition: opacity 0.25s ease; }
+
+        /* Scrollbar, themed to match (Chromium/WebKit) */
+        ::-webkit-scrollbar { width: 10px; height: 10px; }
+        ::-webkit-scrollbar-track { background: transparent; }
+        ::-webkit-scrollbar-thumb { background: var(--border-hover); border-radius: 8px; }
+        ::-webkit-scrollbar-thumb:hover { background: var(--accent); }
     </style>
     """, unsafe_allow_html=True)
 
@@ -714,6 +1037,14 @@ MODE_PARAMS = {
     "Air":  {"speed_kmh": 800, "cost_per_km_kg": 0.0012, "reliability": 0.96},
     "Rail": {"speed_kmh": 60,  "cost_per_km_kg": 0.0005, "reliability": 0.88},
     "Road": {"speed_kmh": 50,  "cost_per_km_kg": 0.0008, "reliability": 0.85},
+}
+
+# Transit icon per transport mode (used anywhere a shipment's mode needs a glyph)
+MODE_ICONS = {
+    "Sea": "🚢",
+    "Air": "✈️",
+    "Rail": "🚆",
+    "Road": "🚚",
 }
 
 # Warehouses for cascade simulation
@@ -846,6 +1177,112 @@ OUTPUTS_DIR = next(
     ) if os.path.isdir(p)),
     os.path.join(_THIS_DIR, "outputs"),
 )
+
+# data/ (gitignored local state, same as data/raw and data/processed) is
+# where the activity-log database lives -- same root-relative resolution.
+DATA_DIR = next(
+    (p for p in (
+        os.path.join(_THIS_DIR, "data"),
+        os.path.join(_THIS_DIR, "..", "data"),
+    ) if os.path.isdir(p)),
+    os.path.join(_THIS_DIR, "..", "data"),
+)
+DB_PATH = os.path.join(DATA_DIR, "scip_activity.db")
+
+
+# ═══════════════════════════════════════════════════════════════════════════════
+#  ACTIVITY LOG (SQLite) -- persists every order placed and every reroute/
+#  escalation/decision taken anywhere in the app, so nothing is lost on
+#  rerun/restart and the whole history is auditable from the Activity Log
+#  page. One flat table is enough: a "new order" and a "reroute executed on
+#  an existing shipment" are both just events with the same shape, telling
+#  event_type apart is all that's needed to group/filter them.
+# ═══════════════════════════════════════════════════════════════════════════════
+EVENT_LABELS = {
+    "order_placed": "📦 Order Placed",
+    "proceed_original": "➡️ Proceeded As-Is",
+    "reroute_mode": "✈️ Modal Reroute",
+    "reroute_vendor": "🏭 Vendor Reroute",
+    "reroute_execute": "🔄 Reroute Executed",
+    "escalate": "🚨 Escalation",
+}
+
+
+@st.cache_resource(show_spinner=False)
+def init_activity_db() -> bool:
+    """Create the activity_log table if it doesn't exist yet. Cached with
+    st.cache_resource so the CREATE TABLE check only runs once per app
+    process (log_event/get_activity_log still call it -- cheap no-op on a
+    cache hit -- so the table is guaranteed to exist before every use,
+    including the very first one after a fresh clone with no data/ dir)."""
+    os.makedirs(DATA_DIR, exist_ok=True)
+    conn = sqlite3.connect(DB_PATH)
+    try:
+        conn.execute("PRAGMA journal_mode=WAL")
+        conn.execute("""
+            CREATE TABLE IF NOT EXISTS activity_log (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                ts TEXT NOT NULL,
+                event_type TEXT NOT NULL,
+                order_ref TEXT,
+                supplier TEXT,
+                origin TEXT,
+                destination TEXT,
+                transport_mode TEXT,
+                product_category TEXT,
+                order_value_usd REAL,
+                quantity REAL,
+                risk_score INTEGER,
+                risk_band TEXT,
+                details TEXT
+            )
+        """)
+        conn.commit()
+    finally:
+        conn.close()
+    return True
+
+
+def log_event(event_type: str, *, order_ref: str | None = None, supplier: str | None = None,
+              origin: str | None = None, destination: str | None = None,
+              transport_mode: str | None = None, product_category: str | None = None,
+              order_value_usd: float | None = None, quantity: float | None = None,
+              risk_score: float | None = None, risk_band: str | None = None,
+              details: str = "") -> None:
+    """Persist one activity-log event -- a new order, a reroute, an
+    escalation, a "proceed as-is" decision -- to the SQLite database so it
+    survives reruns and app restarts and shows up on the Activity Log page.
+    Every action button in the app calls this before showing its toast."""
+    init_activity_db()
+    conn = sqlite3.connect(DB_PATH)
+    try:
+        conn.execute(
+            """INSERT INTO activity_log
+               (ts, event_type, order_ref, supplier, origin, destination, transport_mode,
+                product_category, order_value_usd, quantity, risk_score, risk_band, details)
+               VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+            (
+                datetime.now().isoformat(timespec="seconds"), event_type, order_ref, supplier,
+                origin, destination, transport_mode, product_category,
+                float(order_value_usd) if order_value_usd is not None else None,
+                float(quantity) if quantity is not None else None,
+                int(risk_score) if risk_score is not None else None,
+                risk_band, details,
+            ),
+        )
+        conn.commit()
+    finally:
+        conn.close()
+
+
+def get_activity_log() -> pd.DataFrame:
+    """The full activity log, most recent event first."""
+    init_activity_db()
+    conn = sqlite3.connect(DB_PATH)
+    try:
+        return pd.read_sql_query("SELECT * FROM activity_log ORDER BY id DESC", conn)
+    finally:
+        conn.close()
 
 
 @st.cache_resource(show_spinner=False)
@@ -1355,12 +1792,12 @@ def create_risk_gauge(score_pct: float, category: str, height: int = 200) -> go.
     fig = go.Figure(go.Indicator(
         mode="gauge+number",
         value=round(score_pct * 100, 1) if score_pct <= 1 else score_pct,
-        number={"font": {"size": 44, "color": "#16162A", "family": "Poppins"}, "suffix": "%"},
+        number={"font": {"size": 44, "color": COLOR_TEXT_STRONG, "family": "Poppins"}, "suffix": "%"},
         gauge={
             "axis": {"range": [0, 100], "tickwidth": 0, "dtick": 25,
-                     "tickfont": {"size": 10, "color": "#6A6A8A"}},
+                     "tickfont": {"size": 10, "color": COLOR_TEXT_MUTED}},
             "bar": {"color": risk_color(category), "thickness": 0.3},
-            "bgcolor": "#F0F1F7", "borderwidth": 0,
+            "bgcolor": COLOR_CHART_BG_SOFT, "borderwidth": 0,
             "steps": [
                 {"range": [0, 33], "color": "rgba(9,171,59,0.12)"},
                 {"range": [33, 66], "color": "rgba(250,202,43,0.12)"},
@@ -1401,16 +1838,16 @@ def create_feature_waterfall(features: dict) -> go.Figure:
         marker=dict(color=colors, cornerradius=4),
         text=[f"+{v:.1f}" if v > 0 else f"{v:.1f}" for v in values],
         textposition="outside",
-        textfont=dict(size=11, color="#16162A", family="Poppins"),
+        textfont=dict(size=11, color=COLOR_TEXT_STRONG, family="Poppins"),
         cliponaxis=False,
     ))
     fig.update_layout(
         height=250, margin=dict(l=8, r=55, t=10, b=0),
         paper_bgcolor="rgba(0,0,0,0)", plot_bgcolor="rgba(0,0,0,0)",
-        xaxis=dict(showgrid=False, zeroline=True, zerolinecolor="#B8D4F5",
+        xaxis=dict(showgrid=False, zeroline=True, zerolinecolor=COLOR_BORDER_HOVER,
                    range=[v_lo - pad, v_hi + pad],
-                   tickfont=dict(size=10, color="#6A6A8A")),
-        yaxis=dict(tickfont=dict(size=11, color="#5A5A78"), automargin=True),
+                   tickfont=dict(size=10, color=COLOR_TEXT_MUTED)),
+        yaxis=dict(tickfont=dict(size=11, color=COLOR_TEXT_MUTED), automargin=True),
     )
     return fig
 
@@ -1432,8 +1869,8 @@ def create_financial_waterfall(var_original: float, freight_premium: float, net_
         y=[var_original, -freight_premium, net_savings],
         text=[f"${var_original:,.0f}", f"-${freight_premium:,.0f}", f"${net_savings:,.0f}"],
         textposition="outside",
-        textfont=dict(size=13, color="#1A1A2E", family="Poppins"),
-        connector={"line": {"color": "#B8D4F5", "width": 1}},
+        textfont=dict(size=13, color=COLOR_TEXT_STRONG, family="Poppins"),
+        connector={"line": {"color": COLOR_BORDER_HOVER, "width": 1}},
         increasing={"marker": {"color": COLOR_HIGH}},
         decreasing={"marker": {"color": COLOR_LOW}},
         totals={"marker": {"color": COLOR_ACCENT if net_savings > 0 else COLOR_HIGH}},
@@ -1441,9 +1878,9 @@ def create_financial_waterfall(var_original: float, freight_premium: float, net_
     fig.update_layout(
         height=340, margin=dict(l=10, r=10, t=44, b=44),
         paper_bgcolor="rgba(0,0,0,0)", plot_bgcolor="rgba(0,0,0,0)",
-        xaxis=dict(tickfont=dict(size=11, color="#5A5A78")),
-        yaxis=dict(showgrid=True, gridcolor="rgba(20,70,140,0.07)", range=[y_lo - pad, y_hi + pad],
-                   tickfont=dict(size=10, color="#6A6A8A"), tickprefix="$"),
+        xaxis=dict(tickfont=dict(size=11, color=COLOR_TEXT_MUTED)),
+        yaxis=dict(showgrid=True, gridcolor=COLOR_CHART_GRID, range=[y_lo - pad, y_hi + pad],
+                   tickfont=dict(size=10, color=COLOR_TEXT_MUTED), tickprefix="$"),
         showlegend=False,
     )
     return fig
@@ -1495,12 +1932,12 @@ def create_buffer_depletion_chart(safety_stock_days: int, daily_demand: int,
     fig.update_layout(
         height=290, margin=dict(l=10, r=70, t=24, b=20),
         paper_bgcolor="rgba(0,0,0,0)", plot_bgcolor="rgba(0,0,0,0)",
-        xaxis=dict(title=dict(text="Days", font=dict(size=11, color="#6A6A8A")),
-                   tickfont=dict(size=10, color="#6A6A8A"),
-                   gridcolor="rgba(20,70,140,0.07)"),
-        yaxis=dict(title=dict(text="Units in Buffer", font=dict(size=11, color="#6A6A8A")),
-                   tickfont=dict(size=10, color="#6A6A8A"),
-                   gridcolor="rgba(20,70,140,0.07)"),
+        xaxis=dict(title=dict(text="Days", font=dict(size=11, color=COLOR_TEXT_MUTED)),
+                   tickfont=dict(size=10, color=COLOR_TEXT_MUTED),
+                   gridcolor=COLOR_CHART_GRID),
+        yaxis=dict(title=dict(text="Units in Buffer", font=dict(size=11, color=COLOR_TEXT_MUTED)),
+                   tickfont=dict(size=10, color=COLOR_TEXT_MUTED),
+                   gridcolor=COLOR_CHART_GRID),
         showlegend=False,
     )
     return fig
@@ -1514,13 +1951,13 @@ def create_risk_distribution_chart(df: pd.DataFrame) -> go.Figure:
         y=counts.index, x=counts.values, orientation="h",
         marker=dict(color=colors, cornerradius=6),
         text=counts.values, textposition="auto",
-        textfont=dict(size=13, color="#16162A", family="Poppins"),
+        textfont=dict(size=13, color=COLOR_TEXT_STRONG, family="Poppins"),
     ))
     fig.update_layout(
         height=160, margin=dict(l=0, r=10, t=10, b=0),
         paper_bgcolor="rgba(0,0,0,0)", plot_bgcolor="rgba(0,0,0,0)",
         xaxis=dict(showgrid=False, showticklabels=False, zeroline=False),
-        yaxis=dict(tickfont=dict(size=12, color="#5A5A78"), automargin=True),
+        yaxis=dict(tickfont=dict(size=12, color=COLOR_TEXT_MUTED), automargin=True),
         bargap=0.35,
     )
     return fig
@@ -1554,7 +1991,8 @@ function(cluster) {
 
 
 @st.cache_data(show_spinner=False)
-def build_control_tower_map(df: pd.DataFrame, highlight_id: str | None = None) -> folium.Map:
+def build_control_tower_map(df: pd.DataFrame, highlight_id: str | None = None,
+                             theme: str = "light") -> folium.Map:
     """Build light-themed Folium map: risk-glow clusters, in-transit routes,
     origin markers, base-layer toggle, minimap, fullscreen, a risk legend,
     and -- when highlight_id is set -- a pulsing marker + animated fly-to on
@@ -1585,8 +2023,19 @@ def build_control_tower_map(df: pd.DataFrame, highlight_id: str | None = None) -
         easeLinearity=0.25, inertia=True,
     )
 
-    folium.TileLayer("CartoDB positron", name="Light (Control Tower)", control=True, show=True).add_to(m)
-    folium.TileLayer("CartoDB dark_matter", name="Dark", control=True, show=False).add_to(m)
+    # Default to whichever base layer matches the app's own light/dark
+    # toggle -- `theme` is otherwise unused, its only job is to appear in
+    # this cached function's arguments so a theme switch busts the cache
+    # (module-level PAL/THEME aren't part of the cache key, so relying on
+    # them directly here would leave a stale cached map after toggling).
+    # The LayerControl below still lets the user flip the layer manually;
+    # this just picks a sane starting point instead of always opening on a
+    # bright map inside a dark-themed page.
+    default_tile = _PALETTES[theme]["map_tile"]
+    folium.TileLayer("CartoDB positron", name="Light", control=True,
+                      show=(default_tile == "CartoDB positron")).add_to(m)
+    folium.TileLayer("CartoDB dark_matter", name="Dark", control=True,
+                      show=(default_tile == "CartoDB dark_matter")).add_to(m)
 
     # CSS transitions for the HTML/DivIcon-based layers (canvas-rendered
     # CircleMarkers can't take CSS transitions, but cluster bubbles and the
@@ -1753,7 +2202,7 @@ def render_order_entry_module(df: pd.DataFrame):
     st.markdown('<p class="section-label">📦 Order & Risk Engine — New Shipment</p>',
                 unsafe_allow_html=True)
     st.markdown(
-        '<p style="font-size:12px; color:#5A5A78; margin-top:-8px;">'
+        f'<p style="font-size:12px; color:{COLOR_TEXT_MUTED}; margin-top:-8px;">'
         'Origin, destination, transport mode and supplier options are populated live '
         'from the loaded shipment dataset — nothing below is hardcoded.</p>',
         unsafe_allow_html=True)
@@ -1796,7 +2245,7 @@ def render_order_entry_module(df: pd.DataFrame):
                 for m in modes_for_dest
             )
             st.markdown(
-                f'<div style="margin:2px 0 12px; font-size:11px; color:#6A6A8A;">'
+                f'<div style="margin:2px 0 12px; font-size:11px; color:{COLOR_TEXT_MUTED};">'
                 f'Modes serving <b>{destination}</b>: {pills}</div>',
                 unsafe_allow_html=True)
             mode_options = modes_for_dest
@@ -1899,7 +2348,8 @@ def render_order_entry_module(df: pd.DataFrame):
                 distance=distance, lead_time=lead_time, ship_date=ship_date,
             )
 
-            if result is None:
+            model_available = result is not None
+            if not model_available:
                 st.warning(
                     "⚠ Trained model artifacts not found in `outputs/` — showing a rough "
                     "heuristic estimate instead of a real prediction. Run "
@@ -1914,167 +2364,49 @@ def render_order_entry_module(df: pd.DataFrame):
                     env["geopolitical_risk_index"], supplier_rate,
                     km_per_lead_day, sea_x_cong, mode_p["reliability"]
                 )
-                port_congestion_display = f"{env['port_congestion_level']}/10"
-                weather_display = f"{env['weather_risk_index']}"
-                geo_display = f"{env['geopolitical_risk_index']}"
-                cong_is_high = env["port_congestion_level"] > 6
-                cong_is_med = env["port_congestion_level"] > 3
-                wx_is_high = env["weather_risk_index"] > 0.6
-                wx_is_med = env["weather_risk_index"] > 0.3
-                gp_is_high = env["geopolitical_risk_index"] > 0.35
-                gp_is_med = env["geopolitical_risk_index"] > 0.15
+                enrichment = {
+                    "port_congestion_display": f"{env['port_congestion_level']}/10",
+                    "weather_display": f"{env['weather_risk_index']}",
+                    "geo_display": f"{env['geopolitical_risk_index']}",
+                    "cong_is_high": env["port_congestion_level"] > 6,
+                    "cong_is_med": env["port_congestion_level"] > 3,
+                    "wx_is_high": env["weather_risk_index"] > 0.6,
+                    "wx_is_med": env["weather_risk_index"] > 0.3,
+                    "gp_is_high": env["geopolitical_risk_index"] > 0.35,
+                    "gp_is_med": env["geopolitical_risk_index"] > 0.15,
+                }
                 contributions = {}
             else:
                 prob = result["probability"]
                 raw = result["raw_inputs"]
                 contributions = result["contributions"]
-                port_congestion_display = str(raw["port_congestion_level"])
-                weather_display = f"{raw['weather_risk_index']:.0f}/100"
-                geo_display = f"{raw['geopolitical_risk_index']:.0f}/100"
-                cong_is_high = raw["port_congestion_level"] == "High"
-                cong_is_med = raw["port_congestion_level"] == "Medium"
-                wx_is_high = raw["weather_risk_index"] > 60
-                wx_is_med = raw["weather_risk_index"] > 30
-                gp_is_high = raw["geopolitical_risk_index"] > 50
-                gp_is_med = raw["geopolitical_risk_index"] > 25
+                enrichment = {
+                    "port_congestion_display": str(raw["port_congestion_level"]),
+                    "weather_display": f"{raw['weather_risk_index']:.0f}/100",
+                    "geo_display": f"{raw['geopolitical_risk_index']:.0f}/100",
+                    "cong_is_high": raw["port_congestion_level"] == "High",
+                    "cong_is_med": raw["port_congestion_level"] == "Medium",
+                    "wx_is_high": raw["weather_risk_index"] > 60,
+                    "wx_is_med": raw["weather_risk_index"] > 30,
+                    "gp_is_high": raw["geopolitical_risk_index"] > 50,
+                    "gp_is_med": raw["geopolitical_risk_index"] > 25,
+                }
 
             band = risk_band(prob)
-            color = risk_color(band)
 
-            # Store in session for financial tab
-            st.session_state["last_order"] = {
-                "supplier": supplier, "product": product, "destination": destination,
-                "mode": mode, "order_value": order_value, "quantity": quantity,
-                "distance": distance, "lead_time": lead_time, "prob": prob,
-                "band": band, "supplier_rate": supplier_rate,
-                "origin": origin,
-            }
-
-            # ── Enrichment Results ────────────────────────────────────────
-            st.markdown(
-                '<div class="detail-panel">'
-                '<p class="detail-header">🔍 Auto-Enrichment Results</p>'
-                '<p class="detail-subheader">Environmental & causal factors retrieved for this route</p>'
-                '</div>', unsafe_allow_html=True)
-
-            st.markdown("<div style='height:8px'></div>", unsafe_allow_html=True)
-
-            # Environmental pills
-            ep1, ep2, ep3, ep4 = st.columns(4)
-            with ep1:
-                cong_color = COLOR_HIGH if cong_is_high else (COLOR_MODERATE if cong_is_med else COLOR_LOW)
-                st.markdown(f'''<div class="enrichment-pill">
-                    <span class="ep-icon">🏗️</span>
-                    <div><span class="ep-label">Port Congestion</span><br>
-                    <span class="ep-value" style="color:{cong_color}">{port_congestion_display}</span></div>
-                </div>''', unsafe_allow_html=True)
-            with ep2:
-                wx_color = COLOR_HIGH if wx_is_high else (COLOR_MODERATE if wx_is_med else COLOR_LOW)
-                st.markdown(f'''<div class="enrichment-pill">
-                    <span class="ep-icon">🌧️</span>
-                    <div><span class="ep-label">Weather Risk</span><br>
-                    <span class="ep-value" style="color:{wx_color}">{weather_display}</span></div>
-                </div>''', unsafe_allow_html=True)
-            with ep3:
-                gp_color = COLOR_HIGH if gp_is_high else (COLOR_MODERATE if gp_is_med else COLOR_LOW)
-                st.markdown(f'''<div class="enrichment-pill">
-                    <span class="ep-icon">🌐</span>
-                    <div><span class="ep-label">Geopolitical Risk</span><br>
-                    <span class="ep-value" style="color:{gp_color}">{geo_display}</span></div>
-                </div>''', unsafe_allow_html=True)
-            with ep4:
-                sr_color = COLOR_HIGH if supplier_rate > 0.15 else (COLOR_MODERATE if supplier_rate > 0.08 else COLOR_LOW)
-                st.markdown(f'''<div class="enrichment-pill">
-                    <span class="ep-icon">🏭</span>
-                    <div><span class="ep-label">Supplier Fragility</span><br>
-                    <span class="ep-value" style="color:{sr_color}">{supplier_rate:.0%}</span></div>
-                </div>''', unsafe_allow_html=True)
-
-            # Computed features
-            fc1, fc2 = st.columns(2)
-            with fc1:
-                st.markdown(f'''<div class="enrichment-pill">
-                    <span class="ep-icon">📏</span>
-                    <div><span class="ep-label">Distance</span><br>
-                    <span class="ep-value" style="color:#1A1A2E">{distance:,.0f}km</span></div>
-                </div>''', unsafe_allow_html=True)
-            with fc2:
-                st.markdown(f'''<div class="enrichment-pill">
-                    <span class="ep-icon">⏱️</span>
-                    <div><span class="ep-label">Lead Time</span><br>
-                    <span class="ep-value" style="color:#1A1A2E">{lead_time:.1f}d</span></div>
-                </div>''', unsafe_allow_html=True)
-
-            st.markdown("<div style='height:16px'></div>", unsafe_allow_html=True)
-
-            # ── ML Risk Score ─────────────────────────────────────────────
-            st.markdown('<p class="section-label">🤖 Predictive ML Risk Engine</p>', unsafe_allow_html=True)
-
-            gauge_col, feat_col = st.columns([1, 1])
-            with gauge_col:
-                st.markdown(f'''<div class="detail-panel" style="text-align:center;">
-                    <p style="font-size:11px; color:#6A6A8A; text-transform:uppercase;
-                       letter-spacing:0.1em; font-weight:600;">Disruption Probability</p>
-                </div>''', unsafe_allow_html=True)
-                st.plotly_chart(create_risk_gauge(prob, band, 200), use_container_width=True,
-                                config={"displayModeBar": False})
-                badge = risk_badge_class(band)
-                st.markdown(f'<div style="text-align:center;"><span class="status-badge {badge}">'
-                            f'{band} Risk</span></div>', unsafe_allow_html=True)
-
-            with feat_col:
-                st.markdown(
-                    '<div class="detail-panel">'
-                    '<p style="font-size:11px; color:#6A6A8A; text-transform:uppercase; '
-                    'letter-spacing:0.1em; font-weight:600;">Feature Contributions (SHAP)</p>'
-                    '</div>', unsafe_allow_html=True)
-
-                if contributions:
-                    display_features = {
-                        FEATURE_DISPLAY_NAMES.get(k, k): v for k, v in contributions.items()
-                    }
-                    st.plotly_chart(create_feature_waterfall(display_features), use_container_width=True,
-                                    config={"displayModeBar": False})
-                else:
-                    st.caption("Feature contributions unavailable in fallback (non-ML) mode.")
-
-            # ── Alternatives Generator (only if HIGH risk) ────────────────
+            # ── Alternatives (computed once here, only for High risk, so
+            # the action buttons below don't need to re-run the model on
+            # every unrelated rerun -- see the big note below on why this
+            # whole block reads from session_state instead of local vars.
+            alternatives = None
             if band == "High":
-                st.markdown("<div style='height:16px'></div>", unsafe_allow_html=True)
-                st.markdown(
-                    '<p class="section-label">🔄 Prescriptive Alternatives Generator</p>',
-                    unsafe_allow_html=True)
-                st.markdown(
-                    '<div class="info-box impact">'
-                    '<p class="info-box-title" style="color:#FF4B4B;">⚠ HIGH RISK DETECTED</p>'
-                    '<p class="info-box-content">The system has intercepted this order and autonomously '
-                    'generated safer alternatives. Compare the options below.</p>'
-                    '</div>', unsafe_allow_html=True)
-
-                alt1, alt2, alt3 = st.columns(3)
-
-                # ── Option 1: Original (Risky) ────
-                with alt1:
-                    st.markdown(f'''<div class="alt-card original">
-                        <p class="alt-card-label" style="color:{COLOR_HIGH};">⚠ Original Plan</p>
-                        <p class="alt-card-value" style="color:{COLOR_HIGH};">{prob*100:.1f}%</p>
-                        <p class="alt-card-metric">Disruption Probability</p>
-                        <hr style="border-color:#E7E9F2; margin:12px 0;">
-                        <p class="alt-card-metric">Mode: <b>{mode}</b></p>
-                        <p class="alt-card-metric">Supplier: <b>{supplier}</b></p>
-                        <p class="alt-card-metric">Lead Time: <b>{lead_time:.1f} days</b></p>
-                        <p class="alt-card-metric">Cost: <b>${order_value:,.0f}</b></p>
-                    </div>''', unsafe_allow_html=True)
-
-                # ── Option 2: Modal Shift -- re-scored with the real model,
-                # not simulate_risk_score, by swapping just the mode. ─────
                 alt_mode = "Air" if mode != "Air" else "Rail"
                 alt_mode_p = MODE_PARAMS[alt_mode]
                 alt_mode_lead_hist = df.loc[df["Transport_Mode"] == alt_mode, "Lead_Time_Days"].dropna()
                 alt_lead = float(alt_mode_lead_hist.mean()) if not alt_mode_lead_hist.empty else max(1.0, distance / (alt_mode_p["speed_kmh"] * 24))
                 cost_delta_mode = distance * quantity * (alt_mode_p["cost_per_km_kg"] - MODE_PARAMS[mode]["cost_per_km_kg"])
 
-                if result is not None:
+                if model_available:
                     alt_result_mode = predict_live_risk(
                         df, supplier=supplier, destination=destination, origin=origin,
                         mode=alt_mode, product=product, order_value=order_value, quantity=quantity,
@@ -2085,25 +2417,6 @@ def render_order_entry_module(df: pd.DataFrame):
                     alt_prob_mode = prob
                 alt_band_mode = risk_band(alt_prob_mode)
 
-                with alt2:
-                    mc = risk_color(alt_band_mode)
-                    st.markdown(f'''<div class="alt-card modal-shift">
-                        <p class="alt-card-label" style="color:{COLOR_MODERATE};">✈ Modal Shift → {alt_mode}</p>
-                        <p class="alt-card-value" style="color:{mc};">{alt_prob_mode*100:.1f}%</p>
-                        <p class="alt-card-metric">Disruption Probability</p>
-                        <hr style="border-color:#E7E9F2; margin:12px 0;">
-                        <p class="alt-card-metric">Mode: <b>{alt_mode}</b></p>
-                        <p class="alt-card-metric">Supplier: <b>{supplier}</b> (same)</p>
-                        <p class="alt-card-metric">Lead Time: <b>{alt_lead:.1f} days</b></p>
-                        <p class="alt-card-metric">Cost Delta: <b style="color:{COLOR_MODERATE};">+${max(0,cost_delta_mode):,.0f}</b></p>
-                    </div>''', unsafe_allow_html=True)
-
-                # ── Option 3: Vendor Shift ────────
-                # Alternate supplier serving the same destination (and, when
-                # possible, the same product category), ranked by lowest
-                # historical average Risk_Score in the dataset, then
-                # re-scored with the real model using that supplier's own
-                # country/history instead of reusing the original supplier's.
                 route_alt = df[(df["Destination_City"] == destination) & (df["Supplier"] != supplier)]
                 if "Product_Category" in df.columns:
                     narrowed = route_alt[route_alt["Product_Category"] == product]
@@ -2129,7 +2442,7 @@ def render_order_entry_module(df: pd.DataFrame):
                 else:
                     alt_lead_v = max(1.0, alt_dist / (MODE_PARAMS[mode]["speed_kmh"] * 24))
 
-                if result is not None:
+                if model_available:
                     alt_result_vendor = predict_live_risk(
                         df, supplier=alt_supplier, destination=destination, origin=alt_origin_country,
                         mode=mode, product=product, order_value=order_value, quantity=quantity,
@@ -2140,56 +2453,282 @@ def render_order_entry_module(df: pd.DataFrame):
                     alt_prob_vendor = alt_sr
                 alt_band_vendor = risk_band(alt_prob_vendor)
 
+                alternatives = {
+                    "alt_mode": alt_mode, "alt_lead": alt_lead, "cost_delta_mode": cost_delta_mode,
+                    "alt_prob_mode": alt_prob_mode, "alt_band_mode": alt_band_mode,
+                    "alt_supplier": alt_supplier, "alt_sr": alt_sr, "alt_origin_country": alt_origin_country,
+                    "alt_prob_vendor": alt_prob_vendor, "alt_band_vendor": alt_band_vendor,
+                }
+
+            # Persist this order to the activity log -- every order placed
+            # gets a stable order_ref so the "Proceed / Switch Mode / Switch
+            # Vendor" decision buttons below can log against the same record.
+            order_ref = f"ORD-{datetime.now():%Y%m%d-%H%M%S}"
+            log_event(
+                "order_placed", order_ref=order_ref, supplier=supplier, origin=origin,
+                destination=destination, transport_mode=mode, product_category=product,
+                order_value_usd=order_value, quantity=quantity,
+                risk_score=round(prob * 100), risk_band=band,
+                details=(
+                    f"New order: {supplier} → {destination} via {mode}, {quantity} units, "
+                    f"${order_value:,.0f}. Predicted risk {prob*100:.1f}% ({band})."
+                ),
+            )
+
+            # Everything the display below needs, keyed by order_ref, stored
+            # in session_state -- NOT gated behind `submitted` alone. Every
+            # button below (Proceed / Switch Mode / Switch Vendor) lives
+            # inside this same `if submitted:` scope in the *old* code, which
+            # meant clicking any of them reran the script with `submitted`
+            # back to False (st.form_submit_button's return value is only
+            # True on the exact rerun that submitted the form), so the whole
+            # results panel -- including the very button just clicked --
+            # disappeared before Streamlit could register the click. None of
+            # the three action buttons ever actually did anything. Reading
+            # from session_state instead of a local-variable-plus-`submitted`
+            # gate is what makes them work.
+            st.session_state["last_order"] = {
+                "order_ref": order_ref, "supplier": supplier, "product": product,
+                "destination": destination, "mode": mode, "order_value": order_value,
+                "quantity": quantity, "distance": distance, "lead_time": lead_time,
+                "origin": origin, "prob": prob, "band": band, "supplier_rate": supplier_rate,
+                "contributions": contributions, "enrichment": enrichment,
+                "alternatives": alternatives,
+            }
+
+        # ── Render from session_state, not from `submitted` -- this is what
+        # lets it survive the rerun triggered by clicking one of the action
+        # buttons below (see the long comment above). ──────────────────────
+        last = st.session_state.get("last_order")
+
+        if last:
+            supplier, product, destination = last["supplier"], last["product"], last["destination"]
+            mode, order_value, quantity = last["mode"], last["order_value"], last["quantity"]
+            distance, lead_time, origin = last["distance"], last["lead_time"], last["origin"]
+            prob, band, supplier_rate = last["prob"], last["band"], last["supplier_rate"]
+            contributions, enrichment = last["contributions"], last["enrichment"]
+            order_ref = last["order_ref"]
+
+            st.caption(f"✓ Logged to Activity Log as **{order_ref}**")
+
+            # ── Enrichment Results ────────────────────────────────────────
+            st.markdown(
+                '<div class="detail-panel">'
+                '<p class="detail-header">🔍 Auto-Enrichment Results</p>'
+                '<p class="detail-subheader">Environmental & causal factors retrieved for this route</p>'
+                '</div>', unsafe_allow_html=True)
+
+            st.markdown("<div style='height:8px'></div>", unsafe_allow_html=True)
+
+            # Environmental pills
+            ep1, ep2, ep3, ep4 = st.columns(4)
+            with ep1:
+                cong_color = COLOR_HIGH if enrichment["cong_is_high"] else (COLOR_MODERATE if enrichment["cong_is_med"] else COLOR_LOW)
+                st.markdown(f'''<div class="enrichment-pill">
+                    <span class="ep-icon">🏗️</span>
+                    <div><span class="ep-label">Port Congestion</span><br>
+                    <span class="ep-value" style="color:{cong_color}">{enrichment["port_congestion_display"]}</span></div>
+                </div>''', unsafe_allow_html=True)
+            with ep2:
+                wx_color = COLOR_HIGH if enrichment["wx_is_high"] else (COLOR_MODERATE if enrichment["wx_is_med"] else COLOR_LOW)
+                st.markdown(f'''<div class="enrichment-pill">
+                    <span class="ep-icon">🌧️</span>
+                    <div><span class="ep-label">Weather Risk</span><br>
+                    <span class="ep-value" style="color:{wx_color}">{enrichment["weather_display"]}</span></div>
+                </div>''', unsafe_allow_html=True)
+            with ep3:
+                gp_color = COLOR_HIGH if enrichment["gp_is_high"] else (COLOR_MODERATE if enrichment["gp_is_med"] else COLOR_LOW)
+                st.markdown(f'''<div class="enrichment-pill">
+                    <span class="ep-icon">🌐</span>
+                    <div><span class="ep-label">Geopolitical Risk</span><br>
+                    <span class="ep-value" style="color:{gp_color}">{enrichment["geo_display"]}</span></div>
+                </div>''', unsafe_allow_html=True)
+            with ep4:
+                sr_color = COLOR_HIGH if supplier_rate > 0.15 else (COLOR_MODERATE if supplier_rate > 0.08 else COLOR_LOW)
+                st.markdown(f'''<div class="enrichment-pill">
+                    <span class="ep-icon">🏭</span>
+                    <div><span class="ep-label">Supplier Fragility</span><br>
+                    <span class="ep-value" style="color:{sr_color}">{supplier_rate:.0%}</span></div>
+                </div>''', unsafe_allow_html=True)
+
+            # Computed features
+            fc1, fc2 = st.columns(2)
+            with fc1:
+                st.markdown(f'''<div class="enrichment-pill">
+                    <span class="ep-icon">📏</span>
+                    <div><span class="ep-label">Distance</span><br>
+                    <span class="ep-value" style="color:{COLOR_TEXT_STRONG}">{distance:,.0f}km</span></div>
+                </div>''', unsafe_allow_html=True)
+            with fc2:
+                st.markdown(f'''<div class="enrichment-pill">
+                    <span class="ep-icon">⏱️</span>
+                    <div><span class="ep-label">Lead Time</span><br>
+                    <span class="ep-value" style="color:{COLOR_TEXT_STRONG}">{lead_time:.1f}d</span></div>
+                </div>''', unsafe_allow_html=True)
+
+            st.markdown("<div style='height:16px'></div>", unsafe_allow_html=True)
+
+            # ── ML Risk Score ─────────────────────────────────────────────
+            st.markdown('<p class="section-label">🤖 Predictive ML Risk Engine</p>', unsafe_allow_html=True)
+
+            gauge_col, feat_col = st.columns([1, 1])
+            with gauge_col:
+                st.markdown(f'''<div class="detail-panel" style="text-align:center;">
+                    <p style="font-size:11px; color:{COLOR_TEXT_MUTED}; text-transform:uppercase;
+                       letter-spacing:0.1em; font-weight:600;">Disruption Probability</p>
+                </div>''', unsafe_allow_html=True)
+                st.plotly_chart(create_risk_gauge(prob, band, 200), use_container_width=True,
+                                config={"displayModeBar": False})
+                badge = risk_badge_class(band)
+                st.markdown(f'<div style="text-align:center;"><span class="status-badge {badge}">'
+                            f'{band} Risk</span></div>', unsafe_allow_html=True)
+
+            with feat_col:
+                st.markdown(
+                    '<div class="detail-panel">'
+                    f'<p style="font-size:11px; color:{COLOR_TEXT_MUTED}; text-transform:uppercase; '
+                    'letter-spacing:0.1em; font-weight:600;">Feature Contributions (SHAP)</p>'
+                    '</div>', unsafe_allow_html=True)
+
+                if contributions:
+                    display_features = {
+                        FEATURE_DISPLAY_NAMES.get(k, k): v for k, v in contributions.items()
+                    }
+                    st.plotly_chart(create_feature_waterfall(display_features), use_container_width=True,
+                                    config={"displayModeBar": False})
+                else:
+                    st.caption("Feature contributions unavailable in fallback (non-ML) mode.")
+
+            # ── Alternatives Generator (only if HIGH risk) ────────────────
+            if band == "High" and last["alternatives"]:
+                alt = last["alternatives"]
+                alt_mode, alt_lead = alt["alt_mode"], alt["alt_lead"]
+                cost_delta_mode = alt["cost_delta_mode"]
+                alt_prob_mode, alt_band_mode = alt["alt_prob_mode"], alt["alt_band_mode"]
+                alt_supplier, alt_sr = alt["alt_supplier"], alt["alt_sr"]
+                alt_origin_country = alt["alt_origin_country"]
+                alt_prob_vendor, alt_band_vendor = alt["alt_prob_vendor"], alt["alt_band_vendor"]
+
+                st.markdown("<div style='height:16px'></div>", unsafe_allow_html=True)
+                st.markdown(
+                    '<p class="section-label">🔄 Prescriptive Alternatives Generator</p>',
+                    unsafe_allow_html=True)
+                st.markdown(
+                    '<div class="info-box impact">'
+                    f'<p class="info-box-title" style="color:{COLOR_HIGH};">⚠ HIGH RISK DETECTED</p>'
+                    '<p class="info-box-content">The system has intercepted this order and autonomously '
+                    'generated safer alternatives. Compare the options below.</p>'
+                    '</div>', unsafe_allow_html=True)
+
+                alt1, alt2, alt3 = st.columns(3)
+
+                with alt1:
+                    st.markdown(f'''<div class="alt-card original">
+                        <p class="alt-card-label" style="color:{COLOR_HIGH};">⚠ Original Plan</p>
+                        <p class="alt-card-value" style="color:{COLOR_HIGH};">{prob*100:.1f}%</p>
+                        <p class="alt-card-metric">Disruption Probability</p>
+                        <hr style="border-color:{COLOR_BORDER}; margin:12px 0;">
+                        <p class="alt-card-metric">Mode: <b>{mode}</b></p>
+                        <p class="alt-card-metric">Supplier: <b>{supplier}</b></p>
+                        <p class="alt-card-metric">Lead Time: <b>{lead_time:.1f} days</b></p>
+                        <p class="alt-card-metric">Cost: <b>${order_value:,.0f}</b></p>
+                    </div>''', unsafe_allow_html=True)
+
+                with alt2:
+                    mc = risk_color(alt_band_mode)
+                    st.markdown(f'''<div class="alt-card modal-shift">
+                        <p class="alt-card-label" style="color:{COLOR_MODERATE};">✈ Modal Shift → {alt_mode}</p>
+                        <p class="alt-card-value" style="color:{mc};">{alt_prob_mode*100:.1f}%</p>
+                        <p class="alt-card-metric">Disruption Probability</p>
+                        <hr style="border-color:{COLOR_BORDER}; margin:12px 0;">
+                        <p class="alt-card-metric">Mode: <b>{alt_mode}</b></p>
+                        <p class="alt-card-metric">Supplier: <b>{supplier}</b> (same)</p>
+                        <p class="alt-card-metric">Lead Time: <b>{alt_lead:.1f} days</b></p>
+                        <p class="alt-card-metric">Cost Delta: <b style="color:{COLOR_MODERATE};">+${max(0,cost_delta_mode):,.0f}</b></p>
+                    </div>''', unsafe_allow_html=True)
+
                 with alt3:
                     vc = risk_color(alt_band_vendor)
                     st.markdown(f'''<div class="alt-card vendor-shift">
                         <p class="alt-card-label" style="color:{COLOR_LOW};">🏭 Vendor Shift → {alt_supplier}</p>
                         <p class="alt-card-value" style="color:{vc};">{alt_prob_vendor*100:.1f}%</p>
                         <p class="alt-card-metric">Disruption Probability</p>
-                        <hr style="border-color:#E7E9F2; margin:12px 0;">
+                        <hr style="border-color:{COLOR_BORDER}; margin:12px 0;">
                         <p class="alt-card-metric">Mode: <b>{mode}</b> (same)</p>
                         <p class="alt-card-metric">Supplier: <b>{alt_supplier}</b></p>
                         <p class="alt-card-metric">Fragility: <b style="color:{COLOR_LOW};">{alt_sr:.0%}</b> (was {supplier_rate:.0%})</p>
                         <p class="alt-card-metric">From: <b>{alt_origin_country}</b></p>
                     </div>''', unsafe_allow_html=True)
 
-                # Action buttons
+                # Action buttons -- each decision is persisted to the
+                # activity log against this order's order_ref before the
+                # confirmation toast, so it shows up on the Activity Log page.
                 st.markdown("<div style='height:12px'></div>", unsafe_allow_html=True)
                 b1, b2, b3 = st.columns(3)
                 with b1:
                     if st.button("Proceed with Original", key="orig_btn", use_container_width=True):
+                        log_event(
+                            "proceed_original", order_ref=order_ref, supplier=supplier,
+                            origin=origin, destination=destination, transport_mode=mode,
+                            product_category=product, order_value_usd=order_value, quantity=quantity,
+                            risk_score=round(prob * 100), risk_band=band,
+                            details=f"Proceeding with original high-risk plan ({prob*100:.1f}% risk). Monitoring activated.",
+                        )
                         st.warning("⚠ Proceeding with high-risk original plan. Monitoring activated.")
+                        st.caption(f"✓ Logged to Activity Log against **{order_ref}**")
                 with b2:
                     if st.button(f"✈ Switch to {alt_mode}", type="primary", key="modal_btn", use_container_width=True):
+                        log_event(
+                            "reroute_mode", order_ref=order_ref, supplier=supplier,
+                            origin=origin, destination=destination, transport_mode=alt_mode,
+                            product_category=product, order_value_usd=order_value, quantity=quantity,
+                            risk_score=round(alt_prob_mode * 100), risk_band=alt_band_mode,
+                            details=(
+                                f"Modal reroute {mode} → {alt_mode}. Risk {prob*100:.1f}% → "
+                                f"{alt_prob_mode*100:.1f}%. Cost +${max(0, cost_delta_mode):,.0f}."
+                            ),
+                        )
                         st.success(f"✅ Transport mode changed to {alt_mode}. Risk reduced to {alt_prob_mode*100:.1f}%.")
+                        st.caption(f"✓ Logged to Activity Log against **{order_ref}**")
                 with b3:
                     if st.button(f"🏭 Switch Vendor", type="primary", key="vendor_btn", use_container_width=True):
+                        log_event(
+                            "reroute_vendor", order_ref=order_ref, supplier=alt_supplier,
+                            origin=alt_origin_country, destination=destination, transport_mode=mode,
+                            product_category=product, order_value_usd=order_value, quantity=quantity,
+                            risk_score=round(alt_prob_vendor * 100), risk_band=alt_band_vendor,
+                            details=(
+                                f"Vendor reroute {supplier} → {alt_supplier}. Risk {prob*100:.1f}% → "
+                                f"{alt_prob_vendor*100:.1f}%."
+                            ),
+                        )
                         st.success(f"✅ Supplier changed to {alt_supplier}. Risk reduced to {alt_prob_vendor*100:.1f}%.")
+                        st.caption(f"✓ Logged to Activity Log against **{order_ref}**")
 
             elif band == "Medium":
                 st.markdown(
                     '<div class="info-box warning">'
-                    '<p class="info-box-title" style="color:#FACA2B;">⚡ MEDIUM RISK — Monitor Recommended</p>'
+                    f'<p class="info-box-title" style="color:{COLOR_MODERATE};">⚡ MEDIUM RISK — Monitor Recommended</p>'
                     '<p class="info-box-content">This shipment falls in the medium-risk band. '
                     'Consider setting up automated monitoring alerts. No immediate rerouting required.</p>'
                     '</div>', unsafe_allow_html=True)
-            else:
+            elif band == "Low":
                 st.markdown(
                     '<div class="info-box solution">'
-                    '<p class="info-box-title" style="color:#09AB3B;">✓ LOW RISK — Cleared for Dispatch</p>'
+                    f'<p class="info-box-title" style="color:{COLOR_LOW};">✓ LOW RISK — Cleared for Dispatch</p>'
                     '<p class="info-box-content">All environmental and vendor indicators are within '
                     'acceptable thresholds. This shipment is cleared for standard processing.</p>'
                     '</div>', unsafe_allow_html=True)
 
         else:
             # Empty state
-            st.markdown('''
+            st.markdown(f'''
             <div class="detail-panel" style="text-align:center; padding:80px 28px;">
                 <div style="font-size:56px; margin-bottom:16px;">⚡</div>
-                <p class="detail-header" style="font-size:20px; color:#6A6A8A;">
+                <p class="detail-header" style="font-size:20px; color:{COLOR_TEXT_MUTED};">
                     Enter Order Details to Begin
                 </p>
-                <p style="font-size:13px; color:#4A4A6A; max-width:360px; margin:8px auto 0;">
+                <p style="font-size:13px; color:{COLOR_TEXT_MUTED}; max-width:360px; margin:8px auto 0;">
                     Choose an origin and destination, then fill in the shipment form on the left
                     and click <b>Analyze Risk</b>. The system will auto-enrich environmental data,
                     run the ML risk model, and generate alternatives if the risk is high.
@@ -2422,26 +2961,26 @@ def render_cascade_module(df: pd.DataFrame):
 
         flow_steps = [
             ("📦", _flow_label(row["Supplier"]), row["Origin_City"]),
-            ("🚢", "Transit", row["Transport_Mode"]),
+            (MODE_ICONS.get(row["Transport_Mode"], "🚢"), "Transit", row["Transport_Mode"]),
             ("🏭", wh_id, wh["city"]),
             ("📍", _flow_label(row["Destination_City"]), "Final Destination"),
         ]
 
         chips = []
         for i, (icon, title, sub) in enumerate(flow_steps):
-            chips.append(f'''<div style="background:#FFFFFF; border:2px solid {node_colors[i]};
+            chips.append(f'''<div style="background:{COLOR_BG_CARD}; border:2px solid {node_colors[i]};
                 border-radius:16px; padding:14px 18px; text-align:center; flex:1;
-                min-width:150px; box-shadow:0 4px 14px rgba(20,70,140,0.06);">
+                min-width:150px; box-shadow:0 4px 14px rgba({PAL['shadow_rgb']},0.08);">
                 <div style="font-size:22px; line-height:1;">{icon}</div>
-                <div style="font-size:13px; font-weight:700; color:#0F2A4D; margin-top:6px;
+                <div style="font-size:13px; font-weight:700; color:{COLOR_TEXT_STRONG}; margin-top:6px;
                     line-height:1.4; white-space:nowrap; overflow:hidden; text-overflow:ellipsis;"
                     title="{title}">{title}</div>
-                <div style="font-size:11.5px; color:#4E6D95; margin-top:2px; line-height:1.4;
+                <div style="font-size:11.5px; color:{COLOR_TEXT_MUTED}; margin-top:2px; line-height:1.4;
                     white-space:nowrap; overflow:hidden; text-overflow:ellipsis;">{sub}</div>
             </div>''')
             if i < len(flow_steps) - 1:
                 chips.append(
-                    '<div style="font-size:20px; color:#9DBDE8; padding:0 2px; flex-shrink:0;">➜</div>'
+                    f'<div style="font-size:20px; color:{COLOR_BORDER_HOVER}; padding:0 2px; flex-shrink:0;">➜</div>'
                 )
 
         st.markdown(
@@ -2468,7 +3007,7 @@ def render_cascade_module(df: pd.DataFrame):
 
         with n2:
             st.markdown(f'''<div class="cascade-node {"critical" if delay_days > 3 else "warning" if delay_days > 0 else "safe"}">
-                <div style="font-size:26px; margin-bottom:8px; line-height:1;">🚢</div>
+                <div style="font-size:26px; margin-bottom:8px; line-height:1;">{MODE_ICONS.get(row["Transport_Mode"], "🚢")}</div>
                 <div class="cascade-node-title">Transit Corridor</div>
                 <div class="cascade-node-sub">{row["Transport_Mode"]} · {row["Distance_km"]:,.0f}km</div>
                 <div class="cascade-node-status" style="color:{COLOR_HIGH if delay_days > 3 else COLOR_MODERATE if delay_days > 0 else COLOR_LOW};">
@@ -2571,6 +3110,107 @@ def _show_high_risk_alerts_dialog(alerts_df: pd.DataFrame):
         st.rerun()
 
 
+def render_activity_log_page():
+    """Activity Log: every order placed and every reroute/escalation/
+    decision taken anywhere in the app, read straight from the SQLite
+    activity_log table (see log_event/get_activity_log) -- a durable record
+    that survives reruns and app restarts, independent of any one browser
+    session's st.session_state."""
+    st.markdown('<p class="section-label">🗂️ Activity Log</p>', unsafe_allow_html=True)
+    st.markdown(
+        f'<p style="font-size:12px; color:{COLOR_TEXT_MUTED}; margin-top:-8px;">'
+        f'Every order placed and every reroute, escalation, or decision taken anywhere '
+        f'in the app, persisted to <code>data/{os.path.basename(DB_PATH)}</code>.</p>',
+        unsafe_allow_html=True,
+    )
+    st.markdown("<div style='height:8px'></div>", unsafe_allow_html=True)
+
+    log_df = get_activity_log()
+
+    if log_df.empty:
+        st.markdown(f'''<div class="detail-panel" style="text-align:center; padding:60px 28px;">
+            <div style="font-size:48px; margin-bottom:16px;">🗂️</div>
+            <p class="detail-header" style="font-size:18px; color:{COLOR_TEXT_MUTED};">No Activity Yet</p>
+            <p style="font-size:13px; color:{COLOR_TEXT_MUTED}; max-width:380px; margin:8px auto 0;">
+                Place an order in the Order &amp; Risk Engine, or execute a reroute or
+                escalation from the Control Tower, and it will show up here — permanently,
+                across restarts.</p>
+        </div>''', unsafe_allow_html=True)
+        return
+
+    # ── KPI summary ─────────────────────────────────────────────────────
+    n_orders = int((log_df["event_type"] == "order_placed").sum())
+    n_reroutes = int(log_df["event_type"].isin(["reroute_mode", "reroute_vendor", "reroute_execute"]).sum())
+    n_escalations = int((log_df["event_type"] == "escalate").sum())
+
+    k1, k2, k3, k4 = st.columns(4)
+    with k1:
+        st.markdown(f'''<div class="kpi-card"><p class="kpi-value" style="color:{COLOR_ACCENT};">{len(log_df):,}</p>
+            <p class="kpi-label">Total Events</p></div>''', unsafe_allow_html=True)
+    with k2:
+        st.markdown(f'''<div class="kpi-card"><p class="kpi-value" style="color:{COLOR_TEXT_STRONG};">{n_orders:,}</p>
+            <p class="kpi-label">Orders Placed</p></div>''', unsafe_allow_html=True)
+    with k3:
+        st.markdown(f'''<div class="kpi-card"><p class="kpi-value" style="color:{COLOR_MODERATE};">{n_reroutes:,}</p>
+            <p class="kpi-label">Reroutes</p></div>''', unsafe_allow_html=True)
+    with k4:
+        st.markdown(f'''<div class="kpi-card"><p class="kpi-value" style="color:{COLOR_HIGH};">{n_escalations:,}</p>
+            <p class="kpi-label">Escalations</p></div>''', unsafe_allow_html=True)
+
+    st.markdown("<div style='height:16px'></div>", unsafe_allow_html=True)
+
+    # ── Filters ──────────────────────────────────────────────────────────
+    f1, f2 = st.columns([2, 3])
+    event_types = sorted(log_df["event_type"].unique().tolist())
+    with f1:
+        type_filter = st.multiselect(
+            "Event type", options=event_types, default=event_types,
+            format_func=lambda t: EVENT_LABELS.get(t, t),
+            label_visibility="collapsed", placeholder="Filter by event type",
+        )
+    with f2:
+        search = st.text_input(
+            "Search", label_visibility="collapsed",
+            placeholder="🔎 Search order ref / supplier / destination / details",
+        )
+
+    filtered = log_df[log_df["event_type"].isin(type_filter)] if type_filter else log_df.iloc[0:0]
+    if search:
+        mask = pd.Series(False, index=filtered.index)
+        for col in ["order_ref", "supplier", "destination", "details"]:
+            mask |= filtered[col].astype(str).str.contains(search, case=False, na=False)
+        filtered = filtered[mask]
+
+    st.markdown("<div style='height:4px'></div>", unsafe_allow_html=True)
+
+    display = filtered.copy()
+    display["event_type"] = display["event_type"].map(lambda t: EVENT_LABELS.get(t, t))
+
+    st.dataframe(
+        display[["ts", "event_type", "order_ref", "supplier", "destination", "transport_mode",
+                  "risk_score", "risk_band", "order_value_usd", "details"]],
+        use_container_width=True, hide_index=True, height=460,
+        column_config={
+            "ts": st.column_config.TextColumn("When"),
+            "event_type": st.column_config.TextColumn("Event"),
+            "order_ref": st.column_config.TextColumn("Order Ref"),
+            "supplier": st.column_config.TextColumn("Supplier"),
+            "destination": st.column_config.TextColumn("Destination"),
+            "transport_mode": st.column_config.TextColumn("Mode"),
+            "risk_score": st.column_config.ProgressColumn("Risk", min_value=0, max_value=100, format="%d%%"),
+            "risk_band": st.column_config.TextColumn("Band"),
+            "order_value_usd": st.column_config.NumberColumn("Value (USD)", format="$%,.0f"),
+            "details": st.column_config.TextColumn("Details", width="large"),
+        },
+    )
+    st.caption(f"Showing {len(filtered):,} of {len(log_df):,} logged events")
+
+    st.download_button(
+        "⬇️ Export Full Log as CSV", data=log_df.to_csv(index=False).encode("utf-8"),
+        file_name="scip_activity_log.csv", mime="text/csv",
+    )
+
+
 def render_control_tower(df: pd.DataFrame):
     """Module 6: Live GIS Control Tower & KPI Dashboard."""
 
@@ -2595,7 +3235,7 @@ def render_control_tower(df: pd.DataFrame):
             st.markdown('<p class="kpi-label">🚨 High-Risk Alerts · click to view</p>', unsafe_allow_html=True)
     with k2:
         st.markdown(f'''<div class="kpi-card">
-            <p class="kpi-value" style="color:#16162A;">{len(overdue_df)}</p>
+            <p class="kpi-value" style="color:{COLOR_TEXT_STRONG};">{len(overdue_df)}</p>
             <p class="kpi-label">Overdue Shipments</p></div>''', unsafe_allow_html=True)
     with k3:
         st.markdown(f'''<div class="kpi-card">
@@ -2683,7 +3323,8 @@ def render_control_tower(df: pd.DataFrame):
         st.markdown(
             f'<p class="section-label">📍 Active Threat Map — {len(tower_df):,} overdue shipments</p>',
             unsafe_allow_html=True)
-        folium_map = build_control_tower_map(tower_df, highlight_id=st.session_state["tower_selected_id"])
+        folium_map = build_control_tower_map(
+            tower_df, highlight_id=st.session_state["tower_selected_id"], theme=THEME)
 
         map_data = st_folium(
             folium_map, width=None, height=480,
@@ -2763,7 +3404,7 @@ def render_control_tower(df: pd.DataFrame):
 
             mc1, mc2, mc3 = st.columns(3)
             with mc1:
-                st.markdown(f'''<div class="kpi-card"><p class="kpi-value" style="font-size:20px; color:#16162A;">{o["Volume"]}</p>
+                st.markdown(f'''<div class="kpi-card"><p class="kpi-value" style="font-size:20px; color:{COLOR_TEXT_STRONG};">{o["Volume"]}</p>
                     <p class="kpi-label">Volume</p></div>''', unsafe_allow_html=True)
             with mc2:
                 st.markdown(f'''<div class="kpi-card"><p class="kpi-value" style="font-size:20px; color:{COLOR_HIGH};">{o["Days_Overdue"]}d</p>
@@ -2787,15 +3428,32 @@ def render_control_tower(df: pd.DataFrame):
             bc1, bc2 = st.columns(2)
             with bc1:
                 if st.button("🔄 Execute Reroute", type="primary", key="tower_reroute", use_container_width=True):
+                    log_event(
+                        "reroute_execute", order_ref=o["Order_ID"], supplier=o["Supplier"],
+                        destination=o["Destination_City"], transport_mode=o["Transport_Mode"],
+                        order_value_usd=o["Order_Value_USD"], quantity=o["Volume"],
+                        risk_score=int(o["Risk_Score"]), risk_band=o["Risk_Category"],
+                        details=f"Reroute submitted for {o['Order_ID']} ({o['Supplier']} → {o['Destination_City']}). Ops team notified.",
+                    )
                     st.success(f"Reroute submitted for {o['Order_ID']}. Ops team notified.")
+                    st.caption("✓ Logged to Activity Log")
             with bc2:
                 if st.button("📋 Escalate", key="tower_escalate", use_container_width=True):
-                    st.info(f"Escalation ESC-{random.randint(10000,99999)} created for {o['Order_ID']}.")
+                    esc_id = random.randint(10000, 99999)
+                    log_event(
+                        "escalate", order_ref=o["Order_ID"], supplier=o["Supplier"],
+                        destination=o["Destination_City"], transport_mode=o["Transport_Mode"],
+                        order_value_usd=o["Order_Value_USD"], quantity=o["Volume"],
+                        risk_score=int(o["Risk_Score"]), risk_band=o["Risk_Category"],
+                        details=f"Escalation ESC-{esc_id} created for {o['Order_ID']} ({o['Supplier']} → {o['Destination_City']}).",
+                    )
+                    st.info(f"Escalation ESC-{esc_id} created for {o['Order_ID']}.")
+                    st.caption("✓ Logged to Activity Log")
         elif not tower_df.empty:
-            st.markdown('''<div class="detail-panel" style="text-align:center; padding:28px 20px; margin-top:10px;">
+            st.markdown(f'''<div class="detail-panel" style="text-align:center; padding:28px 20px; margin-top:10px;">
                 <div style="font-size:32px; margin-bottom:8px;">📍</div>
-                <p class="detail-header" style="font-size:14px; color:#6A6A8A;">Select a Shipment</p>
-                <p style="font-size:12px; color:#8A8AA0; max-width:280px; margin:6px auto 0;">
+                <p class="detail-header" style="font-size:14px; color:{COLOR_TEXT_MUTED};">Select a Shipment</p>
+                <p style="font-size:12px; color:{COLOR_TEXT_FAINT}; max-width:280px; margin:6px auto 0;">
                     Click a row above or a marker on the map to see its cascading impact
                     and mitigation options.</p>
             </div>''', unsafe_allow_html=True)
@@ -2831,9 +3489,18 @@ def main():
 
     # ── Sidebar ───────────────────────────────────────────────────────────
     with st.sidebar:
-        st.markdown("### ⚡ SCIP")
+        top_l, top_r = st.columns([2, 1])
+        with top_l:
+            st.markdown("### ⚡ SCIP")
+        with top_r:
+            st.markdown("<div style='height:10px'></div>", unsafe_allow_html=True)
+            st.toggle(
+                "🌙", value=(THEME == "dark"), key="_theme_switch",
+                on_change=_toggle_theme, help="Switch between light and dark mode",
+                label_visibility="visible",
+            )
         st.markdown(
-            '<p style="font-size:11px; color:#6A6A8A; margin-top:-10px;">Supply Chain Intelligence Platform</p>',
+            f'<p style="font-size:11px; color:{COLOR_TEXT_MUTED}; margin-top:-10px;">Supply Chain Intelligence Platform</p>',
             unsafe_allow_html=True)
         st.markdown("---")
 
@@ -2843,8 +3510,8 @@ def main():
         if df.empty:
             st.stop()
         st.markdown(
-            f'<div style="background:#1A2A1A; border:1px solid #2A4A2A; border-radius:8px; '
-            f'padding:8px 12px; font-size:11px; color:#09AB3B;">'
+            f'<div style="background:{PAL["success_chip_bg"]}; border:1px solid {PAL["success_chip_border"]}; border-radius:8px; '
+            f'padding:8px 12px; font-size:11px; color:{COLOR_LOW};">'
             f'✓ Loaded {len(df):,} rows from predictions.xlsx</div>',
             unsafe_allow_html=True)
 
@@ -2852,7 +3519,7 @@ def main():
 
         # Quick stats
         st.markdown(
-            '<p style="font-size:10px; color:#6A6A8A; text-transform:uppercase; '
+            f'<p style="font-size:10px; color:{COLOR_TEXT_MUTED}; text-transform:uppercase; '
             'letter-spacing:0.1em; font-weight:600; margin-bottom:8px;">Network Overview</p>',
             unsafe_allow_html=True)
 
@@ -2870,7 +3537,7 @@ def main():
         st.markdown("---")
 
         st.markdown(
-            '<p style="font-size:10px; color:#6A6A8A; text-transform:uppercase; '
+            f'<p style="font-size:10px; color:{COLOR_TEXT_MUTED}; text-transform:uppercase; '
             'letter-spacing:0.1em; font-weight:600; margin-bottom:8px;">Risk Distribution</p>',
             unsafe_allow_html=True)
 
@@ -2881,7 +3548,7 @@ def main():
 
         st.markdown("---")
         st.markdown(
-            '<p style="font-size:10px; color:#6A6A8A; text-transform:uppercase; '
+            f'<p style="font-size:10px; color:{COLOR_TEXT_MUTED}; text-transform:uppercase; '
             'letter-spacing:0.1em; font-weight:600; margin-bottom:8px;">Suppliers Monitored</p>',
             unsafe_allow_html=True)
         top_suppliers = (
@@ -2897,7 +3564,7 @@ def main():
             st.markdown(
                 f'<div style="display:flex; align-items:center; justify-content:space-between; '
                 f'gap:8px; padding:4px 0; font-size:11px; line-height:1.5;">'
-                f'<span style="color:#48597A; white-space:nowrap; overflow:hidden; '
+                f'<span style="color:{COLOR_TEXT_MUTED}; white-space:nowrap; overflow:hidden; '
                 f'text-overflow:ellipsis; flex:1; min-width:0;" title="{s}">{s}</span>'
                 f'<span style="color:{sc}; font-weight:700; flex-shrink:0;">{rate:.0%}</span></div>',
                 unsafe_allow_html=True)
@@ -2944,6 +3611,9 @@ def main():
     def cascade_page():
         render_cascade_module(df)
 
+    def activity_log_page():
+        render_activity_log_page()
+
     pages["control_tower"] = st.Page(
         control_tower_page, title="Control Tower", icon="🗺️",
         url_path="control-tower", default=True,
@@ -2957,6 +3627,9 @@ def main():
     )
     pages["cascade"] = st.Page(
         cascade_page, title="Cascade Simulator", icon="🌊", url_path="cascade",
+    )
+    pages["activity_log"] = st.Page(
+        activity_log_page, title="Activity Log", icon="🗂️", url_path="activity-log",
     )
 
     nav = st.navigation(list(pages.values()))
