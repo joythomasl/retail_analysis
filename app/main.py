@@ -1223,13 +1223,24 @@ EVENT_LABELS = {
 }
 
 
-@st.cache_resource(show_spinner=False)
 def init_activity_db() -> bool:
-    """Create the activity_log table if it doesn't exist yet. Cached with
-    st.cache_resource so the CREATE TABLE check only runs once per app
-    process (log_event/get_activity_log still call it -- cheap no-op on a
-    cache hit -- so the table is guaranteed to exist before every use,
-    including the very first one after a fresh clone with no data/ dir)."""
+    """Create the activity_log table if it doesn't exist yet. log_event/
+    get_activity_log call this before every use, so the table is guaranteed
+    to exist -- including the very first call after a fresh clone with no
+    data/ dir, and after the .db file is deleted/recreated out from under a
+    still-running process (e.g. a clean checkout, or manual cleanup while
+    the app is up).
+
+    Deliberately NOT @st.cache_resource: CREATE TABLE IF NOT EXISTS is
+    already idempotent and a trivial no-op cost on an existing table, so
+    there's nothing worth caching -- and caching it previously meant that
+    once this succeeded, Streamlit would skip re-running it for the rest of
+    the process's life, so if the underlying file/table ever disappeared
+    afterward, every subsequent log_event()/get_activity_log() call still
+    "passed" this check via a stale cache hit and then crashed with
+    `sqlite3.OperationalError: no such table: activity_log` on the actual
+    INSERT/SELECT -- only a full process restart could recover. Re-checking
+    on every call means it self-heals instead."""
     os.makedirs(DATA_DIR, exist_ok=True)
     conn = sqlite3.connect(DB_PATH)
     try:
