@@ -845,14 +845,29 @@ def inject_custom_css():
 
         /* Dropdown/select popovers render in a portal near <body>, outside
            .stApp -- :root-scoped variables still reach them since they're
-           document-wide, not scoped to where the rule was declared. */
-        div[data-baseweb="popover"] ul[role="listbox"],
-        div[data-baseweb="menu"] {
+           document-wide, not scoped to where the rule was declared.
+           Streamlit's actual dropdown list carries data-testid=
+           "stSelectboxVirtualDropdown", not role="listbox" as the BaseWeb
+           docs suggest -- the mismatch let text go light (correctly, via
+           the color rule below) while its white background never got
+           touched, so every unselected option was light-on-white and
+           unreadable in dark mode. Painting every structural layer inside
+           the popover (its direct wrapper div included, which also ships
+           its own opaque white background) closes that gap regardless of
+           which nested element BaseWeb happens to paint white on. */
+        div[data-baseweb="popover"] {
             background: var(--bg-card) !important;
             border: 1px solid var(--border) !important;
         }
+        div[data-baseweb="popover"] > div,
+        div[data-baseweb="popover"] ul,
+        div[data-baseweb="popover"] [data-testid="stSelectboxVirtualDropdown"],
+        div[data-baseweb="menu"] {
+            background: var(--bg-card) !important;
+        }
 
         div[data-baseweb="popover"] li[role="option"] {
+            background: var(--bg-card) !important;
             color: var(--text) !important;
         }
 
