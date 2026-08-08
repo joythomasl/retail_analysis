@@ -5,6 +5,13 @@ import pydeck as pdk
 import joblib
 import os
 
+# Resolve paths relative to the repo root regardless of the process's cwd
+# (this file lives in app/, so plain "outputs/..." only worked when launched
+# from the repo root -- running `streamlit run app.py` from inside app/
+# silently missed the real data and fell back to mock data).
+ROOT_DIR = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+OUTPUTS_DIR = os.path.join(ROOT_DIR, "outputs")
+
 # 1. Page Configuration
 st.set_page_config(
     page_title="ISCDF Control Tower", 
@@ -17,23 +24,17 @@ st.set_page_config(
 st.title("🌐 Intelligent Supply Chain Disruption Forecaster")
 st.markdown("### Proactive AI Control Tower")
 
-# 3. Data Loading (With Hackathon-Safe Mocking)
+# 3. Data Loading
 @st.cache_data
 def load_data():
-    file_path = "outputs/predictions.csv"
+    file_path = os.path.join(OUTPUTS_DIR, "predictions.csv")
     if os.path.exists(file_path):
         return pd.read_csv(file_path)
-    else:
-        st.warning("⚠️ `outputs/predictions.csv` not found. Using UI mock data.")
-        return pd.DataFrame({
-            "shipment_id": ["SC-1001", "SC-1002", "SC-1003", "SC-1004"],
-            "risk_band": ["High", "Medium", "Low", "High"],
-            "risk_score": [88, 45, 12, 92],
-            "order_value_usd": [45000, 12000, 5000, 78000],
-            "destination_city": ["Los Angeles", "New York", "Chicago", "Frankfurt"],
-            "driver_1": ["port_congestion_level_e", "weather_risk", "None", "sourcing_fragility"],
-            "recommended_action": ["Pre-position stock; consider air freight", "Monitor", "None", "Dual-source this lane"]
-        })
+    st.error(
+        "🚨 `outputs/predictions.csv` not found! Run `python notebooks/rebuild_pipeline.py` "
+        "from the repo root first to train the model and generate real predictions."
+    )
+    st.stop()
 
 df = load_data()
 
@@ -55,7 +56,9 @@ with col4:
 
 # 5. Main Workflow Tabs
 st.markdown("---")
-tab1, tab2, tab3 = st.tabs(["🗺️ Global Map", "⚠️ Network Cascade", "⚙️ What-If Simulator"])
+tab1, tab2, tab3, tab4 = st.tabs(
+    ["🗺️ Global Map", "⚠️ Network Cascade", "⚙️ What-If Simulator", "📋 Shipment Register"]
+)
 
 # ==========================================
 # TAB 1: 3D PYDECK MAP
@@ -63,12 +66,37 @@ tab1, tab2, tab3 = st.tabs(["🗺️ Global Map", "⚠️ Network Cascade", "⚙
 with tab1:
     st.subheader("Live Network Cascade")
     
+    # Covers every destination_city in the real dataset (outputs/predictions.csv);
+    # "Shanghai" is kept as the illustrative origin hub -- predictions.csv
+    # doesn't carry a per-shipment origin city to plot from.
     geo_map = {
-        "Los Angeles": [-118.2437, 34.0522],
-        "New York": [-74.0060, 40.7128],
+        "Atlanta": [-84.3880, 33.7490],
+        "Bengaluru": [77.5946, 12.9716],
+        "Berlin": [13.4050, 52.5200],
+        "Birmingham": [-1.8904, 52.4862],
+        "Chennai": [80.2707, 13.0827],
         "Chicago": [-87.6298, 41.8781],
+        "Delhi": [77.1025, 28.7041],
+        "Dubai": [55.2708, 25.2048],
+        "Hamburg": [9.9937, 53.5511],
+        "Houston": [-95.3698, 29.7604],
+        "London": [-0.1278, 51.5074],
+        "Los Angeles": [-118.2437, 34.0522],
+        "Manchester": [-2.2426, 53.4808],
+        "Marseille": [5.3698, 43.2965],
+        "Melbourne": [144.9631, -37.8136],
+        "Mumbai": [72.8777, 19.0760],
+        "Munich": [11.5820, 48.1351],
+        "New York": [-74.0060, 40.7128],
+        "Osaka": [135.5023, 34.6937],
+        "Paris": [2.3522, 48.8566],
+        "Singapore": [103.8198, 1.3521],
+        "Sydney": [151.2093, -33.8688],
+        "Tokyo": [139.6503, 35.6762],
+        "Toronto": [-79.3832, 43.6532],
+        "Vancouver": [-123.1207, 49.2827],
         "Frankfurt": [8.6821, 50.1109],
-        "Shanghai": [121.4737, 31.2304] 
+        "Shanghai": [121.4737, 31.2304],
     }
 
     map_data = []
@@ -149,11 +177,14 @@ with tab2:
                 st.graphviz_chart(graph_code)
             with c2:
                 st.markdown("### Cascade Analysis")
+                if "driver_1" in row and pd.notna(row.get("driver_1")):
+                    st.caption(f"Top risk driver (SHAP): `{row['driver_1']}`")
                 st.error(f"**Primary Shock:** {delay_days} days late from origin.")
                 if net_delay > 0:
                     st.warning(f"**Buffer Exhausted:** Warehouse safety stock ({warehouse_buffer} days) is insufficient.")
                     st.error(f"**Cascading Impact:** Customer will experience a {net_delay}-day stockout.")
-                    st.success(f"**Suggested Mitigation:** Expedite {net_delay} days of inventory via Air Freight.")
+                    action = row.get("recommended_action") or f"Expedite {net_delay} days of inventory via Air Freight."
+                    st.success(f"**Suggested Mitigation:** {action}")
                 else:
                     st.success(f"**Shock Absorbed:** Warehouse safety stock ({warehouse_buffer} days) covers the delay. No customer impact.")
     else:
@@ -167,58 +198,77 @@ with tab3:
     
     # Safely load the ML artifacts (prefer tuned model, fallback to original)
     try:
-        if os.path.exists("outputs/model_tuned.pkl"):
-            model = joblib.load("outputs/model_tuned.pkl")
+        tuned_path = os.path.join(OUTPUTS_DIR, "model_tuned.pkl")
+        if os.path.exists(tuned_path):
+            model = joblib.load(tuned_path)
         else:
-            model = joblib.load("outputs/model.pkl")
-            
-        encoder = joblib.load("outputs/encoder.pkl")
-        features = joblib.load("outputs/features.pkl")
+            model = joblib.load(os.path.join(OUTPUTS_DIR, "model.pkl"))
+
+        encoder = joblib.load(os.path.join(OUTPUTS_DIR, "encoder.pkl"))
+        features = joblib.load(os.path.join(OUTPUTS_DIR, "features.pkl"))
+        # Per-feature defaults/ranges/options, built from whatever schema the
+        # model was actually trained on -- lets this form stay correct across
+        # both the real-data schema and the synthetic fallback schema without
+        # hardcoding column names (see notebooks/rebuild_pipeline.py).
+        feature_stats = joblib.load(os.path.join(OUTPUTS_DIR, "feature_stats.pkl"))
         ml_ready = True
     except FileNotFoundError:
-        st.error("🚨 ML models not found! Run the ML Pipeline notebook first.")
+        st.error(
+            "🚨 ML models not found or out of date! Run `python notebooks/rebuild_pipeline.py` "
+            "from the repo root first."
+        )
         ml_ready = False
+
+    # Curated priority list of the most decision-relevant fields, across both
+    # the real and synthetic schemas -- only ones present in `features` are
+    # actually rendered as inputs. Everything else in `features` falls back
+    # to its training-data median/mode from feature_stats.
+    PRIORITY_FIELDS = [
+        "supplier_id", "destination_city", "transportation_mode", "order_value_usd",
+        "port_congestion_level", "port_congestion_level_e",
+        "weather_risk_index", "ext_risk",
+        "supplier_reliability_score", "sourcing_fragility",
+        "historical_disruption_count", "customs_clearance_hours",
+        "num_alternate_suppliers", "sea_x_congestion",
+    ]
 
     if ml_ready:
         with st.form("order_simulator"):
             st.markdown("Adjust parameters to see how the ML model changes its risk prediction.")
-            
-            c1, c2, c3 = st.columns(3)
-            supplier = c1.selectbox("Supplier ID", ["S1", "S2", "S3"])
-            destination = c2.selectbox("Destination City", ["Los Angeles", "New York", "Frankfurt"])
-            mode = c3.selectbox("Transport Mode", ["Sea", "Air", "Rail"])
-            
-            c4, c5, c6 = st.columns(3)
-            value_usd = c4.number_input("Order Value ($)", value=55000, step=5000)
-            congestion = c5.selectbox("Port Congestion (External)", ["Low", "Medium", "High"])
-            fragility = c6.selectbox("Supplier Fragility", ["Low", "High"])
-            
+
+            fields_to_render = [f for f in PRIORITY_FIELDS if f in features]
+            live_inputs = {}
+            cols = st.columns(3)
+            for i, fname in enumerate(fields_to_render):
+                stat = feature_stats[fname]
+                col = cols[i % 3]
+                label = fname.replace("_", " ").title()
+                if stat["kind"] == "categorical":
+                    options = stat["options"]
+                    default_idx = options.index(stat["default"]) if stat["default"] in options else 0
+                    live_inputs[fname] = col.selectbox(label, options, index=default_idx)
+                else:
+                    live_inputs[fname] = col.number_input(
+                        label,
+                        min_value=stat["min"],
+                        max_value=stat["max"],
+                        value=stat["default"],
+                    )
+
             submit = st.form_submit_button("Simulate Risk")
-            
+
             if submit:
-                # Build baseline dictionary of zeros for all numeric features
-                input_dict = {f: 0 for f in features} 
-                
-                # Overwrite with live inputs
-                input_dict['supplier_id'] = supplier
-                input_dict['destination_city'] = destination
-                input_dict['transportation_mode'] = mode
-                input_dict['order_value_usd'] = value_usd
-                input_dict['port_congestion_level_e'] = congestion
-                input_dict['sourcing_fragility'] = fragility
-                
-                # Fill mandatory categorical defaults
-                input_dict['warehouse_id'] = 'WH_A'
-                input_dict['sea_x_congestion'] = 'Low'
-                input_dict['customs_clearance_hours'] = 'Low'
-                input_dict['ext_risk'] = 'Low'
-                
+                # Start from each feature's training-data median/mode, then
+                # overwrite with whatever the user actually set above.
+                input_dict = {f: feature_stats[f]["default"] for f in features}
+                input_dict.update(live_inputs)
+
                 input_df = pd.DataFrame([input_dict])
-                
-                # Bulletproof encoding: Ask the encoder exactly which columns it was trained on
+
+                # Ask the encoder exactly which columns it was trained on
                 trained_cat_cols = encoder.feature_names_in_
-                input_df[trained_cat_cols] = encoder.transform(input_df[trained_cat_cols])
-                
+                input_df[trained_cat_cols] = encoder.transform(input_df[trained_cat_cols].astype(str))
+
                 # Run Inference
                 risk_prob = model.predict_proba(input_df[features])[0, 1]
                 risk_score = int(risk_prob * 100)
@@ -236,3 +286,60 @@ with tab3:
                         st.warning("⚠️ **Medium Risk.** Buffer stocks may be consumed. Monitor closely.")
                     else:
                         st.success("✅ **Low Risk.** Route is clear. Standard operating procedures apply.")
+
+# ==========================================
+# TAB 4: SHIPMENT REGISTER (full dataset table)
+# ==========================================
+with tab4:
+    st.subheader("📋 Shipment Risk Register")
+    st.markdown("Every scored shipment, with its top ML-identified risk driver and recommended action.")
+
+    display_cols = [
+        c for c in [
+            "shipment_id", "supplier_id", "destination_city", "transportation_mode",
+            "order_value_usd", "risk_score", "risk_band", "driver_1", "recommended_action",
+        ]
+        if c in df.columns
+    ]
+
+    f1, f2 = st.columns([1, 2])
+    with f1:
+        band_options = sorted(df["risk_band"].dropna().unique()) if "risk_band" in df.columns else []
+        band_filter = st.multiselect("Filter by Risk Band", band_options, default=band_options)
+    with f2:
+        search = st.text_input("Search Shipment ID / Supplier", "")
+
+    filtered = df.copy()
+    if band_filter and "risk_band" in filtered.columns:
+        filtered = filtered[filtered["risk_band"].isin(band_filter)]
+    if search:
+        mask = pd.Series(False, index=filtered.index)
+        for col in ["shipment_id", "supplier_id"]:
+            if col in filtered.columns:
+                mask |= filtered[col].astype(str).str.contains(search, case=False, na=False)
+        filtered = filtered[mask]
+
+    table = filtered[display_cols].sort_values("risk_score", ascending=False) if "risk_score" in display_cols else filtered[display_cols]
+
+    # Pandas Styler has a hard cell-render cap (default 262,144); with a
+    # large real dataset a full unfiltered table can exceed it. Cap the
+    # styled view to the top-N by risk (already sorted above) instead of
+    # rendering (and styling) tens of thousands of rows at once.
+    MAX_STYLED_ROWS = 1000
+    display_table = table.head(MAX_STYLED_ROWS)
+    if len(table) > MAX_STYLED_ROWS:
+        st.caption(
+            f"Showing top {MAX_STYLED_ROWS:,} by risk score, out of {len(filtered):,} matching "
+            f"({len(df):,} total). Narrow the filters above to see more specific shipments."
+        )
+    else:
+        st.caption(f"Showing {len(filtered):,} of {len(df):,} shipments")
+
+    def _highlight_risk(row):
+        color = {"High": "#ff4b4b33", "Medium": "#ffa50033", "Low": "#00c04b33"}.get(row.get("risk_band"), "")
+        return [f"background-color: {color}"] * len(row)
+
+    if "risk_band" in display_table.columns:
+        st.dataframe(display_table.style.apply(_highlight_risk, axis=1), use_container_width=True, height=480)
+    else:
+        st.dataframe(display_table, use_container_width=True, height=480)
